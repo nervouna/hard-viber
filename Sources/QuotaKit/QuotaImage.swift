@@ -3,16 +3,23 @@ import CoreImage
 import SwiftUI
 
 @MainActor
-enum QuotaImageExporter {
+struct QuotaImageExporter {
+    /// The mascot as a die-cut sticker; nothing renders without it.
+    let mascot: NSImage?
+
+    init(mascot url: URL) {
+        mascot = QuotaImageArtwork.sticker(contentsOf: url)
+    }
+
     /// Drops tools that are not installed and moves exhausted subscriptions last.
     static func orderedQuotas(_ quotas: [Quota], at date: Date) -> [Quota] {
         let installed = quotas.filter(\.isInstalled)
-        return installed.filter { $0.group(at: date) != 1 } + installed.filter { $0.group(at: date) == 1 }
+        return installed.filter { $0.group(at: date) != .exhausted } + installed.filter { $0.group(at: date) == .exhausted }
     }
 
-    static func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
-        let quotas = orderedQuotas(quotas, at: date)
-        guard !quotas.isEmpty, let mascot = QuotaImageArtwork.mascot else { return nil }
+    func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
+        let quotas = Self.orderedQuotas(quotas, at: date)
+        guard !quotas.isEmpty, let mascot else { return nil }
         let view = QuotaImageView(summary: QuotaImageSummary(quotas, at: date), mascot: mascot)
             .environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: view)
@@ -24,7 +31,7 @@ enum QuotaImageExporter {
         return bitmap
     }
 
-    static func copy(_ quotas: [Quota], at date: Date, to pasteboard: NSPasteboard = .general) -> Bool {
+    func copy(_ quotas: [Quota], at date: Date, to pasteboard: NSPasteboard = .general) -> Bool {
         guard let bitmap = render(quotas, at: date),
               let png = bitmap.representation(using: .png, properties: [:]),
               let tiff = bitmap.representation(using: .tiff, properties: [:]) else { return false }
@@ -58,9 +65,9 @@ struct QuotaImageSummary {
     init(_ quotas: [Quota], at date: Date) {
         self.quotas = quotas
         self.date = date
-        exhausted = quotas.filter { $0.group(at: date) == 1 }
-        unknown = quotas.filter { $0.group(at: date) == 2 }
-        live = quotas.filter { $0.group(at: date) == 0 }
+        exhausted = quotas.filter { $0.group(at: date) == .exhausted }
+        unknown = quotas.filter { $0.group(at: date) == .unconfirmed }
+        live = quotas.filter { $0.group(at: date) == .available }
         // The same band that `quotaColor` draws red in the menu.
         low = live.filter { ($0.remainingPercent ?? 0) <= 20 }
     }
@@ -100,9 +107,9 @@ struct QuotaImageSummary {
         if quotas.count == 1 {
             let quota = quotas[0]
             switch quota.group(at: date) {
-            case 1: return "0% left. Back in \(quota.resetText(at: date, english: true))."
-            case 2: return "No fresh numbers. Unknown, not dead."
-            default: return "\(quota.percentageText) left. Resets in \(quota.resetText(at: date, english: true))."
+            case .exhausted: return "0% left. Back in \(quota.resetText(at: date, english: true))."
+            case .unconfirmed: return "No fresh numbers. Unknown, not dead."
+            case .available: return "\(quota.percentageText) left. Resets in \(quota.resetText(at: date, english: true))."
             }
         }
         let words = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"]
@@ -127,17 +134,10 @@ struct QuotaImageSummary {
     }
 }
 
-@MainActor
 private enum QuotaImageArtwork {
     /// The mascot as a die-cut sticker: a white border grown from its alpha channel.
-    static let mascot: NSImage? = {
-        #if TESTING
-        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Assets/UsageImage")
-        #else
-        guard let directory = Bundle.main.resourceURL else { return nil }
-        #endif
-        guard let source = CIImage(contentsOf: directory.appendingPathComponent("ShareMascot.png")) else { return nil }
+    static func sticker(contentsOf url: URL) -> NSImage? {
+        guard let source = CIImage(contentsOf: url) else { return nil }
         let border = (source.extent.height * 0.034).rounded()
         let canvas = source.extent.insetBy(dx: -border, dy: -border)
         let outline = CIImage(color: .white).cropped(to: canvas).applyingFilter("CIBlendWithAlphaMask", parameters: [
@@ -146,7 +146,7 @@ private enum QuotaImageArtwork {
         ])
         guard let image = CIContext().createCGImage(source.composited(over: outline), from: canvas) else { return nil }
         return NSImage(cgImage: image, size: canvas.size)
-    }()
+    }
 }
 
 private enum Palette {
@@ -329,7 +329,7 @@ private struct QuotaImageRows: View {
 /// How one row reads: exhausted rows say so in words as well as in orange.
 private struct Readout {
     let quota: Quota
-    let group: Int
+    let group: Quota.Group
     let value: String
     let tag: String?
     let color: Color
@@ -339,14 +339,14 @@ private struct Readout {
         self.quota = quota
         group = quota.group(at: date)
         switch group {
-        case 1: (value, tag, color) = ("0%", "DEAD", Palette.orange)
-        case 2: (value, tag, color) = ("—", "NO SIGNAL", Palette.faint)
-        default: (value, tag, color) = (quota.percentageText, nil, .white)
+        case .exhausted: (value, tag, color) = ("0%", "DEAD", Palette.orange)
+        case .unconfirmed: (value, tag, color) = ("—", "NO SIGNAL", Palette.faint)
+        case .available: (value, tag, color) = (quota.percentageText, nil, .white)
         }
-        reset = group == 2 ? "RESET UNKNOWN" : "RESETS IN " + quota.resetText(at: date, english: true).uppercased()
+        reset = group == .unconfirmed ? "RESET UNKNOWN" : "RESETS IN " + quota.resetText(at: date, english: true).uppercased()
     }
 
-    var nameColor: Color { group == 0 ? .white : Palette.dim }
+    var nameColor: Color { group == .available ? .white : Palette.dim }
 }
 
 private struct Row: View {
@@ -367,7 +367,7 @@ private struct Row: View {
                             .font(Font(Typeface.helvetica(23 * scale)))
                             .tracking(0.4)
                             .foregroundStyle(readout.nameColor)
-                        if let tag = readout.tag { Tag(text: tag, filled: readout.group == 1, size: 13 * scale) }
+                        if let tag = readout.tag { Tag(text: tag, filled: readout.group == .exhausted, size: 13 * scale) }
                     }
                     Text(readout.quota.compactSubtitle)
                         .font(Font(Typeface.helvetica(15 * scale, "Medium")))
@@ -404,7 +404,7 @@ private struct SingleRow: View {
                 Text(readout.quota.name.uppercased())
                     .font(Font(Typeface.helvetica(40)))
                     .foregroundStyle(readout.nameColor)
-                if let tag = readout.tag { Tag(text: tag, filled: readout.group == 1, size: 20) }
+                if let tag = readout.tag { Tag(text: tag, filled: readout.group == .exhausted, size: 20) }
             }
             Text(readout.quota.compactSubtitle)
                 .font(Font(Typeface.helvetica(24, "Medium")))
@@ -450,14 +450,14 @@ private struct Bar: View {
 
     var body: some View {
         GeometryReader { proxy in
-            if readout.group == 2 {
+            if readout.group == .unconfirmed {
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: thickness / 2))
                     path.addLine(to: CGPoint(x: proxy.size.width, y: thickness / 2))
                 }
                 .stroke(Palette.faint, style: StrokeStyle(lineWidth: thickness, dash: [3, 4]))
             } else {
-                let remaining = readout.group == 1 ? 0 : readout.quota.remainingPercent ?? 0
+                let remaining = readout.group == .exhausted ? 0 : readout.quota.remainingPercent ?? 0
                 ZStack(alignment: .leading) {
                     Rectangle().fill(Palette.track)
                     Rectangle().fill(remaining <= 20 ? Palette.orange : .white)
