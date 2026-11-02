@@ -445,6 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let refreshCommand = commands.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r")
         refreshCommand.target = self
         commands.addItem(diagnosticsItem())
+        commands.addItem(LaunchAtLogin.shared.menuItem())
         let quitCommand = commands.addItem(withTitle: "退出 Quota", action: #selector(quit), keyEquivalent: "q")
         quitCommand.target = self
         applicationItem.submenu = commands
@@ -487,6 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             refresh.target = self
             menu.addItem(diagnosticsItem())
             menu.addItem(.separator())
+            menu.addItem(LaunchAtLogin.shared.menuItem())
             let quit = menu.addItem(withTitle: "退出 Quota", action: #selector(quit), keyEquivalent: "q")
             quit.target = self
             item.menu = menu
