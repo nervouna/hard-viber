@@ -1,2 +1,17 @@
 build/
 .DS_Store
+
+# SwiftPM and Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+
+# Node tooling for scripts/*.mjs
+node_modules/
+
+# Local secrets and logs
+.env
+.env.*
+!.env.example
+*.log
