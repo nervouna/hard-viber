@@ -33,6 +33,14 @@ enum QuotaImageExporter {
     }
 }
 
+extension Quota {
+    /// The image's narrow columns use the subscription's short plan label when it has one.
+    var compactSubtitle: String {
+        let label = shortPlan ?? (plan?.isEmpty == false ? plan! : "—")
+        return bucket.map { "\(label) / \($0)" } ?? label
+    }
+}
+
 private struct QuotaImageArtwork {
     let paper: NSImage
     let mascot: NSImage
@@ -143,12 +151,6 @@ private struct QuotaImageCell: View {
     let quota: Quota
     let date: Date
 
-    private var subtitle: String {
-        let plan = quota.provider == "antigravity" && quota.plan == "Google AI Pro"
-            ? "AI Pro" : (quota.plan?.isEmpty == false ? quota.plan! : "—")
-        return quota.bucket.map { "\(plan) / \($0)" } ?? plan
-    }
-
     var body: some View {
         let group = quota.group(at: date)
         let primary = Color(white: group == 0 ? 0.04 : 0.61)
@@ -158,7 +160,7 @@ private struct QuotaImageCell: View {
                 Text(quota.name)
                     .font(.system(size: 25, weight: .bold, design: .rounded))
                     .foregroundStyle(primary)
-                Text(subtitle)
+                Text(quota.compactSubtitle)
                     .font(.system(size: 16.5, weight: .medium, design: .rounded))
                     .foregroundStyle(secondary)
                     .minimumScaleFactor(0.8)
