@@ -4,7 +4,7 @@
   margins trimmed from `../Icon/Artwork/fried-laptop.png`, then downscaled to
   365×400 px (Lanczos, premultiplied alpha). It is the only bundled artwork.
 
-`Sources/QuotaImage.swift` draws the image as a magazine cover inspired by
+`Sources/QuotaKit/QuotaImage.swift` draws the image as a magazine cover inspired by
 Bloomberg Businessweek (no name, logo or wordmark of it appears): a flat cover
 field on the left and a black panel with one row per installed subscription on
 the right, always 800×512 pt rendered at 2x.

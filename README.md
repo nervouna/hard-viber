@@ -7,7 +7,7 @@ It is a personal tool: plan labels match one person's subscriptions. Provider to
 ## Requirements
 
 - macOS 14 or later.
-- Xcode 26 or later. `scripts/build.sh` uses `swiftc` and `actool`, and the app icon is an Icon Composer document.
+- Xcode 26 or later. `scripts/build.sh` uses `swift build` and `actool`, the tests use Swift Testing, and the app icon is an Icon Composer document.
 - Node.js 22.15 or later; Homebrew `node@24` is preferred. The app runs its collector with the first of `/opt/homebrew/opt/node@24/bin/node`, `/usr/local/opt/node@24/bin/node`, then `node` in `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` and `PATH`, unless `config.json` sets `node`.
 - The tools of the providers you use (see [Data sources](#data-sources)). Providers whose tool is not installed are hidden.
 
@@ -15,21 +15,31 @@ It is a personal tool: plan labels match one person's subscriptions. Provider to
 
 ```bash
 bash scripts/build.sh          # builds build/Quota.app (about 25 s)
-scripts/test.sh                # all test suites and the Swift 6 typecheck
+scripts/test.sh                # the Node suites and swift test
 scripts/test.sh /tmp/quota     # also writes the shareable image fixtures there
+swift build                    # the Swift package alone, debug
+swift test                     # the Swift tests alone
 open build/Quota.app --args --show   # --show opens the list at launch
 node scripts/collect-usage.mjs       # the collector on its own; prints JSON, logs to stderr
 ```
 
 `node scripts/collect-usage.mjs --providers claude,grok` queries only those providers.
 
-There is no Xcode project or Swift package: `swiftc` compiles `Sources/*.swift` into one binary, and `build.sh` copies the collector scripts, `scripts/subscriptions.json`, `VERSION` and the image artwork into the bundle. To install, copy `build/Quota.app` to `~/Applications`.
+The Swift code is a package (`Package.swift`, Swift 6 language mode, macOS 14): the `QuotaKit` library holds the model, the merge rules, the collector runner and the views, the `Quota` executable only starts it, and `QuotaKitTests` tests the library with Swift Testing. `swift build` alone does not make an app. `build.sh` runs `swift build -c release`, then assembles `build/Quota.app` from an empty bundle: the binary, the collector scripts, `scripts/subscriptions.json`, `VERSION` and the mascot in `Contents/Resources`, the icons compiled by `actool`, and `Info.plist`. The app finds those files through `AppResources`, which tests point at the repository instead. With `QUOTA_IMAGE_FIXTURES=<directory>`, `swift test` writes the shareable image fixtures there, as `scripts/test.sh <directory>` does.
+
+`build.sh` signs ad hoc unless `CODESIGN_IDENTITY` names a signing identity. With one, it signs with the hardened runtime and a secure timestamp, and without entitlements (no `get-task-allow`), ready for notarization:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)" bash scripts/build.sh
+```
+
+To install, run `bash scripts/install.sh`, which builds the app (passing `CODESIGN_IDENTITY` through), quits a running Quota and replaces `~/Applications/Quota.app`.
 
 `VERSION` holds the only version number. `build.sh` writes it to `CFBundleShortVersionString`, uses the commit count (`git rev-list --count HEAD`) as `CFBundleVersion`, and the collector sends it as `clientInfo.version`.
 
 ## How it works
 
-`Sources/Quota.swift` runs `scripts/collect-usage.mjs` with the providers to query. The collector queries them in parallel (25 s limit each; the app stops the run after 35 s) and prints one JSON report that names the providers it covered.
+`UsageStore` (`Sources/QuotaKit/UsageStore.swift`) runs `scripts/collect-usage.mjs` with the providers to query. The collector queries them in parallel (25 s limit each; the app stops the run after 35 s) and prints one JSON report that names the providers it covered.
 
 `scripts/subscriptions.json` lists the rows: id, provider, display name, billing cycle, and optional plan, short plan label, bucket, and `local` (the provider reads local files instead of starting a tool). The collector and the app both read it, so it is the only place to add, remove or rename a row.
 
@@ -40,7 +50,7 @@ Nothing shows the values until the list opens, so background refreshes only keep
 - Opening the list, copying the image and 刷新 refresh every provider. Opening and copying skip a provider refreshed less than a minute ago; 刷新 does not.
 - 10 seconds after the Mac wakes (the network is often not back at once), every provider that has a background refresh under the current conditions.
 - While the list stays open, every provider every 5 minutes.
-- In the background (`RefreshPolicy` in `Sources/RefreshPolicy.swift`, checked once a minute):
+- In the background (`RefreshPolicy` in `Sources/QuotaKit/RefreshPolicy.swift`, checked once a minute):
 
   | Conditions | Claude (`local`) | Tools (OpenAI, Antigravity, Kiro, Grok) |
   | --- | --- | --- |
@@ -143,14 +153,21 @@ The collector's stderr goes to `~/Library/Logs/Quota/collector.log`: one line pe
 
 | Path | Contents |
 | --- | --- |
-| `Sources/Quota.swift` | Model, merge rules, the collector runner, the menu bar UI |
-| `Sources/RefreshPolicy.swift` | When providers refresh, by power conditions |
-| `Sources/Config.swift` | `config.json` for the app, and the Node lookup |
-| `Sources/QuotaImage.swift` | The shareable image |
-| `Sources/CollectorLog.swift` | The diagnostics log |
+| `Package.swift` | The Swift package: `QuotaKit`, `Quota`, `QuotaKitTests` |
+| `Sources/Quota/main.swift` | The executable: starts `QuotaKit` with the app's resource directory |
+| `Sources/QuotaKit/Quota.swift` | The model (`Quota`, its `Status` and `Group`), the subscription list, merge rules |
+| `Sources/QuotaKit/UsageStore.swift` | The collector runner and the cache |
+| `Sources/QuotaKit/QuotaPanel.swift` | The list in the popover |
+| `Sources/QuotaKit/AppDelegate.swift` | The menu bar item, menus and copying |
+| `Sources/QuotaKit/AppResources.swift` | Where the bundled files are |
+| `Sources/QuotaKit/RefreshPolicy.swift` | When providers refresh, by power conditions |
+| `Sources/QuotaKit/Config.swift` | `config.json` for the app, and the Node lookup |
+| `Sources/QuotaKit/QuotaImage.swift` | The shareable image |
+| `Sources/QuotaKit/CollectorLog.swift` | The diagnostics log |
+| `Sources/QuotaKit/LaunchAtLogin.swift` | The 开机时启动 menu item |
 | `scripts/subscriptions.json` | The rows, shared by the app and the collector |
 | `scripts/collect-usage.mjs` | The collector |
 | `scripts/claude-cache-probe.mjs` | The Claude Desktop cache reader |
-| `scripts/test*.mjs`, `Tests/` | Tests, run by `scripts/test.sh` |
+| `scripts/test*.mjs`, `Tests/QuotaKitTests/` | Tests, run by `scripts/test.sh` |
 | `Assets/` | App icon, menu bar icon, image artwork |
 | `VERSION` | The version number |
