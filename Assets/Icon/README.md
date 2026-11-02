@@ -8,12 +8,13 @@ appearance uses the matching high-contrast outline also used in the menu bar.
 Appearance-specific values are kept together in specialization arrays; do not
 add a competing base property alongside an array for the same value.
 
-`Concepts/` preserves all three generated proposals. `melted-groove.png` and
-`spent-spark.png` are reserved alternatives, not runtime assets.
+The three generated proposals (Fried Laptop, Melted Groove, Spent Spark) and the
+presentation board they came from were removed from the tree. They remain in git
+history at commit `c683314`, under `Assets/Icon/Concepts/`.
 
 `Artwork/fried-laptop.png` is the approved character isolated on transparency.
 `Artwork/menu-bar-source.png` is its simplified black template artwork. Both
-were produced with the built-in Imagegen tool using `Concepts/fried-laptop.png`
+were produced with the built-in Imagegen tool using the Fried Laptop proposal
 as the visual reference. The production prompts preserve the selected shape,
 colors, tilt, face, and texture; remove the presentation board and icon tile;
 and require true transparency. The menu prompt additionally removes color,
