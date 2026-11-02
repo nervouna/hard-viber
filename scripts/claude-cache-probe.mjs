@@ -66,14 +66,18 @@ export function parseEntry(bytes) {
   return { ...identity, responseTime, usage };
 }
 
-function readUsageEntries(directory) {
+// Reads the given cache files, or every file in the directory. `files` lists the files whose key
+// is a usage URL, whether or not their response could be read.
+function readUsageEntries(directory, filenames) {
   const entries = [];
   const rejected = [];
-  let filenames;
-  try { filenames = fs.readdirSync(directory); }
-  catch (error) {
-    if (error.code === 'ENOENT') return { entries, rejected };
-    throw error;
+  const files = [];
+  if (!filenames) {
+    try { filenames = fs.readdirSync(directory); }
+    catch (error) {
+      if (error.code === 'ENOENT') return { entries, rejected, files };
+      throw error;
+    }
   }
   for (const filename of filenames) {
     if (!/^[a-f0-9]{16}_0$/.test(filename)) continue;
@@ -89,22 +93,29 @@ function readUsageEntries(directory) {
       const key = Buffer.alloc(keyLength);
       if (fs.readSync(fd, key, 0, keyLength, 24) !== keyLength || !usageURL(key)) continue;
       relevant = true;
+      files.push(filename);
       const entry = parseEntry(fs.readFileSync(fd));
       if (entry) entries.push({ ...entry, filename });
     } catch (error) {
       if (relevant) rejected.push({ filename, reason: error.code ?? 'invalid_or_changing_entry' });
     } finally { if (fd !== undefined) fs.closeSync(fd); }
   }
-  return { entries, rejected };
+  return { entries, rejected, files };
 }
 
-export function snapshot(directory = root) {
+// `files` limits the read to those cache files; `usage_files` in the result lists the files that
+// held usage responses, for the next read.
+export function snapshot(directory = root, { files: only } = {}) {
+  // Without these a zstd body would fail as an unreadable entry and hide the real cause.
+  if (typeof zlib.zstdDecompressSync !== 'function' || typeof zlib.crc32 !== 'function') {
+    throw new Error(`Node ${process.version} cannot read Claude Desktop's cache; Quota needs Node 22.15 or later`);
+  }
   const now = Date.now();
   const historyFile = path.join(directory, 'plan-usage-history.json');
   const history = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
   if (history.version !== 2 || !Array.isArray(history.samples)) throw new Error(`Unsupported history format: ${historyFile}`);
   const last = history.samples.at(-1);
-  const { entries, rejected } = readUsageEntries(path.join(directory, 'Cache/Cache_Data'));
+  const { entries, rejected, files } = readUsageEntries(path.join(directory, 'Cache/Cache_Data'), only);
   // Use the latest history organization; do not mix account caches or query variants.
   const matching = entries.filter(entry => last?.org && entry.organization === last.org).sort((a, b) => b.responseTime - a.responseTime);
   const newest = matching[0];
@@ -133,7 +144,7 @@ export function snapshot(directory = root) {
       snapshot_at: date(resets.responseTime), age_seconds: age(resets.responseTime),
       grants: resets.usage.cedar_ember.grants.map(grant => ({ label: grant.label, remaining: grant.resets_left, total: grant.resets_total, expires_at: grant.ends_at, type: grant.type, usable_at_snapshot: grant.usable_now })),
     } : null,
-    valid_usage_cache_entries: matching.length, rejected_entries: rejected,
+    valid_usage_cache_entries: matching.length, rejected_entries: rejected, usage_files: files,
   };
 }
 

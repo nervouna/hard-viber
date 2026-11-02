@@ -1,5 +1,5 @@
 [
-  { "id": "claude", "provider": "claude", "name": "Claude", "cycle": "weekly" },
+  { "id": "claude", "provider": "claude", "name": "Claude", "cycle": "weekly", "local": true },
   { "id": "openai", "provider": "openai", "name": "OpenAI", "cycle": "weekly" },
   { "id": "antigravity-gemini", "provider": "antigravity", "name": "Antigravity", "cycle": "weekly", "plan": "Google AI Pro", "shortPlan": "AI Pro", "bucket": "Gemini" },
   { "id": "antigravity-claude", "provider": "antigravity", "name": "Antigravity", "cycle": "weekly", "plan": "Google AI Pro", "shortPlan": "AI Pro", "bucket": "Claude + GPT" },
