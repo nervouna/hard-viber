@@ -279,21 +279,9 @@ struct QuotaRow: View {
     }
 }
 
-@MainActor
-final class CopyFeedback: ObservableObject {
-    struct Event: Identifiable {
-        let id = UUID()
-        let succeeded: Bool
-        let location: CGPoint?
-    }
-
-    @Published var event: Event?
-}
-
 struct QuotaPanel: View {
     @ObservedObject var store: UsageStore
-    @ObservedObject var feedback: CopyFeedback
-    let onCopy: (CGPoint?) -> Void
+    let onCopy: () -> Void
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
@@ -310,35 +298,8 @@ struct QuotaPanel: View {
             .frame(width: 336)
         }
         .contentShape(Rectangle())
-        .onTapGesture(coordinateSpace: .local) { onCopy($0) }
-        .accessibilityAction(named: Text("复制用量图片")) { onCopy(nil) }
-        .overlay {
-            GeometryReader { geometry in
-                if let event = feedback.event {
-                    let point = event.location ?? CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
-                    Image(systemName: event.succeeded ? "checkmark" : "xmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 28, height: 28)
-                        .background(.regularMaterial, in: Circle())
-                        .overlay { Circle().stroke(.primary.opacity(0.1), lineWidth: 0.5) }
-                        .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-                        .position(x: min(max(point.x, 18), geometry.size.width - 18),
-                                  y: min(max(point.y, 18), geometry.size.height - 18))
-                        .accessibilityLabel(event.succeeded ? "用量图片已复制" : "用量图片复制失败")
-                        .id(event.id)
-                        .transition(.opacity)
-                }
-            }
-            .allowsHitTesting(false)
-        }
-        .animation(.easeOut(duration: 0.12), value: feedback.event?.id)
-        .task(id: feedback.event?.id) {
-            guard let event = feedback.event else { return }
-            do { try await Task.sleep(nanoseconds: 1_100_000_000) }
-            catch { return }
-            if feedback.event?.id == event.id { feedback.event = nil }
-        }
+        .onTapGesture(perform: onCopy)
+        .accessibilityAction(named: Text("复制用量图片"), onCopy)
     }
 }
 
@@ -349,7 +310,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var observation: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
-    private let copyFeedback = CopyFeedback()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -368,7 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popover.behavior = .transient
         popover.animates = true
-        let controller = NSHostingController(rootView: QuotaPanel(store: store, feedback: copyFeedback, onCopy: { [weak self] in self?.copyImage(at: $0) }))
+        let controller = NSHostingController(rootView: QuotaPanel(store: store, onCopy: { [weak self] in self?.copyUsageImage() }))
         controller.sizingOptions = [.preferredContentSize]
         popover.contentViewController = controller
         let applicationMenu = NSMenu()
@@ -427,14 +387,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func copyUsageImage() {
-        copyImage(at: nil)
-    }
-
-    private func copyImage(at location: CGPoint?) {
-        let copied = QuotaImageExporter.copy(store.quotas, at: Date())
-        if !popover.isShown { show() }
-        copyFeedback.event = CopyFeedback.Event(succeeded: copied, location: location)
-        if !copied { NSSound.beep() }
+        if QuotaImageExporter.copy(store.quotas, at: Date()) {
+            popover.performClose(nil)
+        } else {
+            NSSound.beep()
+        }
     }
 
     @objc private func refresh() { store.refresh(force: true) }
