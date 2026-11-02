@@ -214,19 +214,27 @@ private func quotaColor(for group: Int, remaining: Double?) -> Color {
 struct QuotaRing: View {
     let quota: Quota
     let group: Int
+    var size: CGFloat = 18
+    var lineWidth: CGFloat = 2.5
+    var hidesUnconfirmed = false
 
     var body: some View {
         let color = quotaColor(for: group, remaining: quota.remainingPercent)
         ZStack {
-            Circle().stroke(color.opacity(group == 2 ? 0.15 : 0.2), lineWidth: 2.5)
-            if let value = quota.remainingPercent, value > 0 {
+            Circle().stroke(color.opacity(group == 2 ? 0.15 : 0.2), lineWidth: lineWidth)
+            if let value = quota.remainingPercent, value > 0, !(hidesUnconfirmed && group == 2) {
+                let fraction = min(1, value / 100)
+                // Round caps must not fill the final gap of a nearly full ring.
+                let cap = lineWidth / (2 * .pi * size)
+                let start = fraction == 1 ? 0 : min(cap, fraction / 2)
+                let end = fraction == 1 ? 1 : max(start + 0.00001, fraction - cap)
                 Circle()
-                    .trim(from: 0, to: min(1, max(0, value / 100)))
-                    .stroke(color.opacity(group == 2 ? 0.4 : 1), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .trim(from: start, to: end)
+                    .stroke(color.opacity(group == 2 ? 0.4 : 1), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
         }
-        .frame(width: 18, height: 18)
+        .frame(width: size, height: size)
         .accessibilityHidden(true)
     }
 }
@@ -273,6 +281,7 @@ struct QuotaRow: View {
 
 struct QuotaPanel: View {
     @ObservedObject var store: UsageStore
+    let onCopy: () -> Void
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
@@ -288,6 +297,9 @@ struct QuotaPanel: View {
             .padding(.vertical, 5)
             .frame(width: 336)
         }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onCopy)
+        .accessibilityAction(named: Text("复制用量图片"), onCopy)
     }
 }
 
@@ -298,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var observation: AnyCancellable?
     private var wakeObserver: NSObjectProtocol?
+    private var copyFeedback: DispatchWorkItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -316,12 +329,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popover.behavior = .transient
         popover.animates = true
-        let controller = NSHostingController(rootView: QuotaPanel(store: store))
+        let controller = NSHostingController(rootView: QuotaPanel(store: store, onCopy: { [weak self] in self?.copyUsageImage() }))
         controller.sizingOptions = [.preferredContentSize]
         popover.contentViewController = controller
         let applicationMenu = NSMenu()
         let applicationItem = applicationMenu.addItem(withTitle: "Quota", action: nil, keyEquivalent: "")
         let commands = NSMenu()
+        let copyCommand = commands.addItem(withTitle: "复制用量图片", action: #selector(copyUsageImage), keyEquivalent: "c")
+        copyCommand.target = self
         let refreshCommand = commands.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r")
         refreshCommand.target = self
         let quitCommand = commands.addItem(withTitle: "退出 Quota", action: #selector(quit), keyEquivalent: "q")
@@ -358,6 +373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggle() {
         if NSApplication.shared.currentEvent?.type == .rightMouseUp {
             let menu = NSMenu()
+            let copy = menu.addItem(withTitle: "复制用量图片", action: #selector(copyUsageImage), keyEquivalent: "c")
+            copy.target = self
             let refresh = menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r")
             refresh.target = self
             menu.addItem(.separator())
@@ -370,6 +387,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { show() }
     }
 
+    @objc private func copyUsageImage() {
+        let copied = QuotaImageExporter.copy(store.quotas, at: Date())
+        copyFeedback?.cancel()
+        setStatusImage(copied ? "checkmark" : "xmark", label: copied ? "用量图片已复制" : "用量图片复制失败")
+        if !copied { NSSound.beep() }
+        let restore = DispatchWorkItem { [weak self] in
+            self?.setStatusImage("chart.donut", label: "Quota")
+        }
+        copyFeedback = restore
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: restore)
+    }
+
+    private func setStatusImage(_ symbol: String, label: String) {
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        image?.isTemplate = true
+        image?.size = NSSize(width: 18, height: 18)
+        item.button?.image = image
+        item.button?.toolTip = label
+        item.button?.setAccessibilityLabel(label)
+    }
+
     @objc private func refresh() { store.refresh(force: true) }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
@@ -379,6 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        copyFeedback?.cancel()
         store.stop()
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
     }

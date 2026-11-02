@@ -8,7 +8,7 @@ mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources" "$project_dir/b
 xcrun swiftc -swift-version 5 -parse-as-library -O \
   -target "$(uname -m)-apple-macosx14.0" \
   -module-cache-path "$project_dir/build/module-cache" \
-  "$project_dir/Sources/Quota.swift" \
+  "$project_dir"/Sources/*.swift \
   -o "$app_dir/Contents/MacOS/Quota"
 
 cp "$project_dir/scripts/collect-usage.mjs" "$project_dir/scripts/claude-cache-probe.mjs" "$app_dir/Contents/Resources/"
@@ -21,8 +21,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Quota</string>
   <key>CFBundleDisplayName</key><string>Quota</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.6</string>
-  <key>CFBundleVersion</key><string>7</string>
+  <key>CFBundleShortVersionString</key><string>0.1.7</string>
+  <key>CFBundleVersion</key><string>8</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
