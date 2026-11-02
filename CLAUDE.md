@@ -12,6 +12,6 @@ macOS menu bar app (Swift/SwiftUI + AppKit) plus a Node 24 collector. See README
 
 - No Xcode project or Swift package: `swiftc` compiles `Sources/*.swift` together, so a new source file is picked up by the build, the tests and the typecheck. Tests compile the same sources with `-D TESTING` and check with `precondition`.
 - `scripts/subscriptions.json` is the only list of rows and their display labels. The collector and the app both read it; never hard-code row ids, names or plans in Swift or JS.
-- Row `status` is `"ready"`, `"unavailable"` or `"missing"` (tool not installed). Collector errors read `<Provider> <stage>: <detail>`; README.md lists the stages.
+- Row `status` is `"ready"`, `"unavailable"` or `"missing"` (tool not installed: hidden from the list and the image, listed with `missingPath` under 诊断). Collector errors read `<Provider> <stage>: <detail>`; README.md lists the stages.
 - Keep the merge rules in `Quota`/`UsageReport` pure functions; tests must not create `UsageStore`, which reads the real cache.
 - UI text is Chinese. Code, comments, docs and commit messages are English.

@@ -37,6 +37,11 @@ struct Quota: Codable, Identifiable {
     var observedAt: Double?
     var status: String
     var error: String?
+    /// The executable or file that was checked when `status` is "missing".
+    var missingPath: String?
+
+    /// Rows of a tool that is not installed are hidden.
+    var isInstalled: Bool { status != "missing" }
 
     var subtitle: String {
         let label = plan?.isEmpty == false ? plan! : "—"
@@ -99,7 +104,6 @@ struct Quota: Codable, Identifiable {
 
     func accessibilityText(at date: Date) -> String {
         let reason = error.map { "，错误：\($0)" } ?? ""
-        if status == "missing" { return "\(name)，\(subtitle)，未安装\(reason)" }
         let freshness = group(at: date) == 2 ? "，数据暂时无法确认" : ""
         let window = cycle == "monthly" ? "月度" : "每周"
         return "\(name)，\(subtitle)，\(window)剩余 \(percentageText)，重置倒计时 \(resetText(at: date))\(freshness)\(reason)"
@@ -126,14 +130,16 @@ extension Quota {
         value.observedAt = observedAt
         value.status = status
         value.error = error
+        value.missingPath = missingPath
         return value
     }
 
     /// Records a failed query. A good value stays ready until the freshness window in
     /// `group(at:)` expires, so one failed cycle does not grey out the row.
-    func failed(_ status: String, error: String, at date: Date) -> Quota {
+    func failed(_ status: String, error: String, missingPath: String? = nil, at date: Date) -> Quota {
         var value = self
         value.error = error
+        value.missingPath = missingPath
         if group(at: date) == 2 { value.status = status }
         return value
     }
@@ -149,10 +155,13 @@ extension Quota {
         }
     }
 
-    /// Distinct errors across rows, for the diagnostics menu.
+    /// Distinct errors across rows, for the diagnostics menu. Hidden rows name the path that
+    /// was checked, because a tool installed somewhere else would otherwise vanish silently.
     static func problems(in quotas: [Quota]) -> [String] {
-        let errors = (quotas.isEmpty ? ["subscriptions.json is missing or invalid"] : []) + quotas.compactMap(\.error)
-        return errors.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+        let lines = (quotas.isEmpty ? ["subscriptions.json is missing or invalid"] : []) + quotas.compactMap { quota in
+            quota.isInstalled ? quota.error : "未检测到：\(quota.name)" + (quota.missingPath.map { "（\($0)）" } ?? "")
+        }
+        return lines.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
     }
 }
 
@@ -183,7 +192,8 @@ struct UsageReport: Decodable {
                 return previous.failed("unavailable", error: "Collector protocol: no \(subscription.id) row in the report", at: date)
             }
             guard fresh.status != "ready" else { return fresh.described(by: subscription) }
-            return previous.failed(fresh.status, error: fresh.error ?? "\(subscription.name) failed without a reason", at: date)
+            return previous.failed(fresh.status, error: fresh.error ?? "\(subscription.name) failed without a reason",
+                                   missingPath: fresh.missingPath, at: date)
         }
     }
 }
@@ -211,6 +221,7 @@ final class UsageStore: ObservableObject {
     }
 
     var problems: [String] { Quota.problems(in: quotas) }
+    var installedQuotas: [Quota] { quotas.filter(\.isInstalled) }
 
     func start() {
         refresh(force: true)
@@ -345,12 +356,12 @@ struct QuotaRow: View {
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
             VStack(alignment: .trailing, spacing: 1) {
-                Text(quota.status == "missing" ? "未安装" : quota.percentageText)
+                Text(quota.percentageText)
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(group == 0 ? .primary : .secondary)
                     .minimumScaleFactor(0.85)
-                Text(quota.status == "missing" ? "—" : quota.resetText(at: now))
+                Text(quota.resetText(at: now))
                     .font(.system(size: 10.5, weight: .regular))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -373,13 +384,20 @@ struct QuotaPanel: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
-            let groups = (0...2).map { group in store.quotas.filter { $0.group(at: timeline.date) == group } }.filter { !$0.isEmpty }
+            let quotas = store.installedQuotas
+            let groups = (0...2).map { group in quotas.filter { $0.group(at: timeline.date) == group } }.filter { !$0.isEmpty }
             VStack(spacing: 0) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, quotas in
                     if index > 0 {
                         Divider().padding(.horizontal, 12).padding(.vertical, 4)
                     }
                     ForEach(quotas) { quota in QuotaRow(quota: quota, now: timeline.date) }
+                }
+                if quotas.isEmpty {
+                    Text("未检测到已安装的服务")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 36)
                 }
             }
             .padding(.vertical, 5)
@@ -445,8 +463,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func resize() {
-        let groups = Set(store.quotas.map { $0.group(at: Date()) }).count
-        popover.contentSize = NSSize(width: 336, height: 10 + store.quotas.count * 36 + max(0, groups - 1) * 9)
+        let quotas = store.installedQuotas
+        let groups = Set(quotas.map { $0.group(at: Date()) }).count
+        // An empty list shows one row-high message.
+        popover.contentSize = NSSize(width: 336, height: 10 + max(1, quotas.count) * 36 + max(0, groups - 1) * 9)
     }
 
     private func show() {

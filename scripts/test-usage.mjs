@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   collect, command, normalizeAntigravity, normalizeClaude, normalizeGrok, normalizeKiro, normalizeOpenAI, rpc, subscriptions,
 } from './collect-usage.mjs';
@@ -33,9 +36,15 @@ assert.deepEqual(subscriptions.map(row => row.id), ['claude', 'openai', 'antigra
 assert.deepEqual(subscriptions.filter(row => row.shortPlan).map(row => row.id), ['antigravity-gemini', 'antigravity-claude']);
 
 // Each failure names its stage, through the real spawn and JSON-RPC paths.
-await assert.rejects(command('/nonexistent/quota-tool', []), { stage: 'spawn', missing: true, message: '/nonexistent/quota-tool is not installed' });
+await assert.rejects(command('/nonexistent/quota-tool', []), { stage: 'spawn', missingPath: '/nonexistent/quota-tool', message: '/nonexistent/quota-tool is not installed' });
 await assert.rejects(command('/bin/sh', ['-c', 'echo boom >&2; exit 3']),
-  error => error.stage === 'exit' && error.message === 'sh exited with code 3' && error.stderr.trim() === 'boom' && !error.missing);
+  error => error.stage === 'exit' && error.message === 'sh exited with code 3' && error.stderr.trim() === 'boom' && !error.missingPath);
+// An installed script whose interpreter is missing also fails with ENOENT; it is not "not installed".
+const scripts = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-tool-'));
+const orphan = path.join(scripts, 'orphan');
+fs.writeFileSync(orphan, '#!/nonexistent/interpreter\n', { mode: 0o755 });
+await assert.rejects(command(orphan, []), error => error.stage === 'spawn' && error.missingPath === undefined && error.message === `${orphan}: ENOENT`);
+fs.rmSync(scripts, { recursive: true, force: true });
 await assert.rejects(command('/bin/sleep', ['5'], 100), { stage: 'timeout', message: 'no result within 0.1 s' });
 const server = reply => `require('readline').createInterface({ input: process.stdin }).on('line', line => {
   const { id } = JSON.parse(line);
@@ -55,13 +64,13 @@ const report = await collect({
   antigravity: { query: () => command('/nonexistent/agy', []), parse: normalizeAntigravity },
   kiro: { query: () => command('/bin/sh', ['-c', 'echo container failed >&2; exit 2']), parse: normalizeKiro },
 }, line => lines.push(line));
-assert.deepEqual(report.quotas.map(row => [row.id, row.status, row.error]), [
-  ['claude', 'ready', undefined],
-  ['openai', 'unavailable', 'OpenAI parse: No weekly OpenAI window returned'],
-  ['antigravity-gemini', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed'],
-  ['antigravity-claude', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed'],
-  ['kiro', 'unavailable', 'Kiro exit: sh exited with code 2'],
-  ['grok', 'unavailable', 'Grok config: no collector for this provider'],
+assert.deepEqual(report.quotas.map(row => [row.id, row.status, row.error, row.missingPath]), [
+  ['claude', 'ready', undefined, undefined],
+  ['openai', 'unavailable', 'OpenAI parse: No weekly OpenAI window returned', undefined],
+  ['antigravity-gemini', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed', '/nonexistent/agy'],
+  ['antigravity-claude', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed', '/nonexistent/agy'],
+  ['kiro', 'unavailable', 'Kiro exit: sh exited with code 2', undefined],
+  ['grok', 'unavailable', 'Grok config: no collector for this provider', undefined],
 ]);
 assert.ok(lines.includes('Kiro exit: sh exited with code 2\n  container failed'), 'The log keeps the child stderr tail');
 assert.match(lines.at(-1), /^1\/6 rows ready in \d+\.\d s$/);
