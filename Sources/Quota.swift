@@ -33,18 +33,22 @@ struct Quota: Codable, Identifiable {
         return formatter.date(from: resetsAt) ?? ISO8601DateFormatter().date(from: resetsAt)
     }
 
-    func resetText(at now: Date) -> String {
+    func resetText(at now: Date, english: Bool = false) -> String {
         guard let resetDate else { return "—" }
         if resetsAt?.count == 10 {
             // A date-only source cannot establish an hourly reset countdown.
             let calendar = Calendar.autoupdatingCurrent
             let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: resetDate).day ?? 0
-            return "\(max(0, days))天"
+            return english ? "\(max(0, days))d" : "\(max(0, days))天"
         }
         let remaining = resetDate.timeIntervalSince(now)
-        guard remaining > 0 else { return "0小时" }
-        if remaining < 3600 { return "\(Int(ceil(remaining / 60)))分钟" }
+        guard remaining > 0 else { return english ? "0h" : "0小时" }
+        if remaining < 3600 {
+            let minutes = Int(ceil(remaining / 60))
+            return english ? "\(minutes)m" : "\(minutes)分钟"
+        }
         let hours = Int(remaining / 3600)
+        if english { return hours >= 24 ? "\(hours / 24)d \(hours % 24)h" : "\(hours)h" }
         return hours >= 24 ? "\(hours / 24)天\(hours % 24)小时" : "\(hours)小时"
     }
 
@@ -204,7 +208,7 @@ final class UsageStore: ObservableObject {
     }
 }
 
-private func quotaColor(for group: Int, remaining: Double?) -> Color {
+func quotaColor(for group: Int, remaining: Double?) -> Color {
     guard group == 0, let remaining, remaining > 0 else { return .secondary }
     if remaining > 50 { return Color(red: 0.23, green: 0.53, blue: 0.43) }
     if remaining > 20 { return Color(red: 0.62, green: 0.42, blue: 0.10) }

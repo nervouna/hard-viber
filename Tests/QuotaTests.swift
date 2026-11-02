@@ -38,9 +38,14 @@ struct QuotaTests {
         precondition(quota.resetText(at: now) == "—")
         quota.resetsAt = "2026-12-01"
         precondition(quota.resetText(at: now) == "29天", "A date-only source must not invent reset hours")
+        precondition(quota.resetText(at: now, english: true) == "29d")
         for (seconds, expected) in [(49 * 3600, "2天1小时"), (23 * 3600, "23小时"), (45 * 60, "45分钟"), (1, "1分钟"), (0, "0小时"), (-1, "0小时")] {
             quota.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(Double(seconds)))
             precondition(quota.resetText(at: now) == expected, "Incorrect countdown at \(seconds) seconds")
+        }
+        for (seconds, expected) in [(49 * 3600, "2d 1h"), (24 * 3600, "1d 0h"), (23 * 3600, "23h"), (45 * 60, "45m"), (1, "1m"), (0, "0h")] {
+            quota.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(Double(seconds)))
+            precondition(quota.resetText(at: now, english: true) == expected, "Incorrect English countdown at \(seconds) seconds")
         }
         print("Quota state tests passed: remaining balances, exhaustion, staleness, countdown boundaries, date-only precision.")
     }
