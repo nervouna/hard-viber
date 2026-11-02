@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { normalizeAntigravity, normalizeClaude, normalizeGrok, normalizeKiro, normalizeOpenAI } from './collect-usage.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  collect, command, normalizeAntigravity, normalizeClaude, normalizeGrok, normalizeKiro, normalizeOpenAI, rpc, subscriptions,
+} from './collect-usage.mjs';
 
 // Keep unlike billing windows distinct, and convert remaining into consumed usage.
 assert.equal(normalizeAntigravity('Gemini Models\tWeekly Limit Remaining\t75.5%\t2026-11-04T12:00:00Z\nClaude and GPT models\tWeekly Limit Remaining\t0%\t2026-11-09T04:00:00Z')[0].usedPercent, 24.5);
@@ -25,3 +30,48 @@ const antigravity = normalizeAntigravity('Gemini Models\tWeekly Limit Remaining\
 assert.deepEqual(antigravity.map(row => [row.name, row.plan, row.bucket]), [['Antigravity', 'Google AI Pro', 'Gemini'], ['Antigravity', 'Google AI Pro', 'Claude + GPT']]);
 assert.throws(() => normalizeClaude({ history: { usage: {} } }));
 console.log('Usage parsing passed: plan tiers, bucket labels, weekly selection, percentage direction, monthly preservation, missing data.');
+
+// The subscription list is shared with the app; keep its order and labels stable.
+assert.deepEqual(subscriptions.map(row => row.id), ['claude', 'openai', 'antigravity-gemini', 'antigravity-claude', 'kiro', 'grok']);
+assert.deepEqual(subscriptions.filter(row => row.shortPlan).map(row => row.id), ['antigravity-gemini', 'antigravity-claude']);
+
+// Each failure names its stage, through the real spawn and JSON-RPC paths.
+await assert.rejects(command('/nonexistent/quota-tool', []), { stage: 'spawn', missingPath: '/nonexistent/quota-tool', message: '/nonexistent/quota-tool is not installed' });
+await assert.rejects(command('/bin/sh', ['-c', 'echo boom >&2; exit 3']),
+  error => error.stage === 'exit' && error.message === 'sh exited with code 3' && error.stderr.trim() === 'boom' && !error.missingPath);
+// An installed script whose interpreter is missing also fails with ENOENT; it is not "not installed".
+const scripts = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-tool-'));
+const orphan = path.join(scripts, 'orphan');
+fs.writeFileSync(orphan, '#!/nonexistent/interpreter\n', { mode: 0o755 });
+await assert.rejects(command(orphan, []), error => error.stage === 'spawn' && error.missingPath === undefined && error.message === `${orphan}: ENOENT`);
+fs.rmSync(scripts, { recursive: true, force: true });
+await assert.rejects(command('/bin/sleep', ['5'], 100), { stage: 'timeout', message: 'no result within 0.1 s' });
+const server = reply => `require('readline').createInterface({ input: process.stdin }).on('line', line => {
+  const { id } = JSON.parse(line);
+  process.stdout.write(JSON.stringify(id === 1 ? { id, result: {} } : { id, ...${JSON.stringify(reply)} }) + '\\n');
+});`;
+assert.deepEqual(await rpc(process.execPath, ['-e', server({ result: { ok: true } })], {}, 'x/read'), { ok: true });
+await assert.rejects(rpc(process.execPath, ['-e', server({ error: { code: -32601, message: 'no such method' } })], {}, 'x/read'),
+  { stage: 'protocol', message: 'x/read failed (-32601: no such method)' });
+await assert.rejects(rpc(process.execPath, ['-e', 'process.exit(4)'], {}, 'x/read'), { stage: 'exit', message: /exited with code 4 before replying/ });
+await assert.rejects(rpc(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {}, 'x/read', {}, { timeout: 100 }), { stage: 'timeout' });
+
+// A failed provider reports only its own rows, with provider and stage in the error.
+const lines = [];
+const report = await collect({
+  claude: { query: async () => ({ history: { usage: { sd: 10 }, last_sample_at: '2026-11-02T04:00:00Z' } }), parse: normalizeClaude },
+  openai: { query: async () => ({}), parse: normalizeOpenAI },
+  antigravity: { query: () => command('/nonexistent/agy', []), parse: normalizeAntigravity },
+  kiro: { query: () => command('/bin/sh', ['-c', 'echo container failed >&2; exit 2']), parse: normalizeKiro },
+}, line => lines.push(line));
+assert.deepEqual(report.quotas.map(row => [row.id, row.status, row.error, row.missingPath]), [
+  ['claude', 'ready', undefined, undefined],
+  ['openai', 'unavailable', 'OpenAI parse: No weekly OpenAI window returned', undefined],
+  ['antigravity-gemini', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed', '/nonexistent/agy'],
+  ['antigravity-claude', 'missing', 'Antigravity spawn: /nonexistent/agy is not installed', '/nonexistent/agy'],
+  ['kiro', 'unavailable', 'Kiro exit: sh exited with code 2', undefined],
+  ['grok', 'unavailable', 'Grok config: no collector for this provider', undefined],
+]);
+assert.ok(lines.includes('Kiro exit: sh exited with code 2\n  container failed'), 'The log keeps the child stderr tail');
+assert.match(lines.at(-1), /^1\/6 rows ready in \d+\.\d s$/);
+console.log('Collector failures passed: spawn, missing, exit, timeout, protocol, parse, per-provider rows, stderr tails.');

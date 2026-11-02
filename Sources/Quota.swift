@@ -2,18 +2,46 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// One row of `scripts/subscriptions.json`, which the collector reads too.
+struct Subscription: Decodable {
+    let id: String
+    let provider: String
+    let name: String
+    let cycle: String
+    var plan: String?
+    /// A shorter form of `plan` for the shareable image.
+    var shortPlan: String?
+    var bucket: String?
+
+    static let all: [Subscription] = {
+        #if TESTING
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("scripts/subscriptions.json")
+        #else
+        guard let url = Bundle.main.url(forResource: "subscriptions", withExtension: "json") else { return [] }
+        #endif
+        return (try? JSONDecoder().decode([Subscription].self, from: Data(contentsOf: url))) ?? []
+    }()
+}
+
 struct Quota: Codable, Identifiable {
     let id: String
     let provider: String
     var name: String
     let cycle: String
     var plan: String?
+    var shortPlan: String?
     var bucket: String?
     var usedPercent: Double?
     var resetsAt: String?
     var observedAt: Double?
     var status: String
     var error: String?
+    /// The executable or file that was checked when `status` is "missing".
+    var missingPath: String?
+
+    /// Rows of a tool that is not installed are hidden.
+    var isInstalled: Bool { status != "missing" }
 
     var subtitle: String {
         let label = plan?.isEmpty == false ? plan! : "—"
@@ -75,34 +103,111 @@ struct Quota: Codable, Identifiable {
     }
 
     func accessibilityText(at date: Date) -> String {
+        let reason = error.map { "，错误：\($0)" } ?? ""
         let freshness = group(at: date) == 2 ? "，数据暂时无法确认" : ""
         let window = cycle == "monthly" ? "月度" : "每周"
-        return "\(name)，\(subtitle)，\(window)剩余 \(percentageText)，重置倒计时 \(resetText(at: date))\(freshness)"
+        return "\(name)，\(subtitle)，\(window)剩余 \(percentageText)，重置倒计时 \(resetText(at: date))\(freshness)\(reason)"
     }
 
-    static let placeholders: [Quota] = [
-        ("claude", "claude", "Claude", "weekly"),
-        ("openai", "openai", "OpenAI", "weekly"),
-        ("antigravity-gemini", "antigravity", "Antigravity", "weekly"),
-        ("antigravity-claude", "antigravity", "Antigravity", "weekly"),
-        ("kiro", "kiro", "Kiro", "monthly"),
-        ("grok", "grok", "Grok", "weekly"),
-    ].map { item in
-        let bucket = item.0 == "antigravity-gemini" ? "Gemini" : item.0 == "antigravity-claude" ? "Claude + GPT" : nil
-        return Quota(id: item.0, provider: item.1, name: item.2, cycle: item.3,
-                     plan: item.1 == "antigravity" ? "Google AI Pro" : nil, bucket: bucket, status: "unavailable")
+    static let placeholders = Subscription.all.map(Quota.init)
+}
+
+// In an extension so the memberwise initializer stays available.
+extension Quota {
+    init(_ subscription: Subscription) {
+        self.init(id: subscription.id, provider: subscription.provider, name: subscription.name, cycle: subscription.cycle,
+                  plan: subscription.plan, shortPlan: subscription.shortPlan, bucket: subscription.bucket, status: "unavailable")
+    }
+
+    /// Keeps the observed values and takes everything else from the subscription list.
+    func described(by subscription: Subscription) -> Quota {
+        var value = Quota(subscription)
+        value.plan = plan ?? subscription.plan
+        // The short label belongs to the listed plan, not to a plan the provider reports.
+        value.shortPlan = value.plan == subscription.plan ? subscription.shortPlan : nil
+        value.usedPercent = usedPercent
+        value.resetsAt = resetsAt
+        value.observedAt = observedAt
+        value.status = status
+        value.error = error
+        value.missingPath = missingPath
+        return value
+    }
+
+    /// Records a failed query. A good value stays ready until the freshness window in
+    /// `group(at:)` expires, so one failed cycle does not grey out the row.
+    func failed(_ status: String, error: String, missingPath: String? = nil, at date: Date) -> Quota {
+        var value = self
+        value.error = error
+        value.missingPath = missingPath
+        if group(at: date) == 2 { value.status = status }
+        return value
+    }
+
+    static func restore(_ saved: [Quota], subscriptions: [Subscription] = Subscription.all) -> [Quota] {
+        subscriptions.map { subscription in
+            guard var value = saved.first(where: { $0.id == subscription.id }) else { return Quota(subscription) }
+            // Caches written before plan metadata kept Kiro's tier in the name.
+            if value.plan == nil, value.provider == "kiro", value.name.hasPrefix("Kiro ") {
+                value.plan = String(value.name.dropFirst(5))
+            }
+            return value.described(by: subscription)
+        }
+    }
+
+    /// Distinct errors across rows, for the diagnostics menu. Hidden rows name the path that
+    /// was checked, because a tool installed somewhere else would otherwise vanish silently.
+    static func problems(in quotas: [Quota]) -> [String] {
+        let lines = (quotas.isEmpty ? ["subscriptions.json is missing or invalid"] : []) + quotas.compactMap { quota in
+            quota.isInstalled ? quota.error : "未检测到：\(quota.name)" + (quota.missingPath.map { "（\($0)）" } ?? "")
+        }
+        return lines.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
     }
 }
 
 struct UsageReport: Decodable {
     let fetchedAt: Double
     let quotas: [Quota]
+
+    static let timeout: TimeInterval = 35
+
+    /// Classifies a finished collector run. A run the app stopped exits 0 with no
+    /// output, so the timeout flag must be checked before the status and the output.
+    static func decode(_ data: Data, terminationStatus: Int32, timedOut: Bool) -> Result<UsageReport, CollectorFailure> {
+        if timedOut { return .failure(CollectorFailure("Collector timeout: no result within \(Int(timeout)) s")) }
+        guard terminationStatus == 0 else {
+            return .failure(CollectorFailure("Collector exit: node exited with status \(terminationStatus)"))
+        }
+        guard let report = try? JSONDecoder().decode(UsageReport.self, from: data) else {
+            return .failure(CollectorFailure("Collector parse: the output is not a usage report (\(data.count) bytes)"))
+        }
+        return .success(report)
+    }
+
+    /// Merges per row: a failed or missing row keeps its last good value and records the error.
+    func merged(into current: [Quota], subscriptions: [Subscription] = Subscription.all, at date: Date) -> [Quota] {
+        subscriptions.map { subscription in
+            let previous = current.first { $0.id == subscription.id } ?? Quota(subscription)
+            guard let fresh = quotas.first(where: { $0.id == subscription.id }) else {
+                return previous.failed("unavailable", error: "Collector protocol: no \(subscription.id) row in the report", at: date)
+            }
+            guard fresh.status != "ready" else { return fresh.described(by: subscription) }
+            return previous.failed(fresh.status, error: fresh.error ?? "\(subscription.name) failed without a reason",
+                                   missingPath: fresh.missingPath, at: date)
+        }
+    }
+}
+
+struct CollectorFailure: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
 }
 
 @MainActor
 final class UsageStore: ObservableObject {
     @Published var quotas = Quota.placeholders
     private var process: Process?
+    private var timedOut = false
     private var timer: Timer?
     private var lastRefresh: Date?
     private let cacheURL = FileManager.default.homeDirectoryForCurrentUser
@@ -111,18 +216,12 @@ final class UsageStore: ObservableObject {
     init() {
         if let data = try? Data(contentsOf: cacheURL),
            let saved = try? JSONDecoder().decode([Quota].self, from: data) {
-            quotas = Quota.placeholders.map { placeholder in
-                var value = saved.first { $0.id == placeholder.id } ?? placeholder
-                if value.plan == nil, value.provider == "kiro", value.name.hasPrefix("Kiro ") {
-                    value.plan = String(value.name.dropFirst(5))
-                }
-                value.name = placeholder.name
-                value.bucket = placeholder.bucket
-                value.plan = value.plan ?? placeholder.plan
-                return value
-            }
+            quotas = Quota.restore(saved)
         }
     }
+
+    var problems: [String] { Quota.problems(in: quotas) }
+    var installedQuotas: [Quota] { quotas.filter(\.isInstalled) }
 
     func start() {
         refresh(force: true)
@@ -136,24 +235,25 @@ final class UsageStore: ObservableObject {
         if !force, let lastRefresh, Date().timeIntervalSince(lastRefresh) < 60 { return }
         lastRefresh = Date()
         guard let helper = Bundle.main.url(forResource: "collect-usage", withExtension: "mjs") else {
-            fail("Missing collect-usage.mjs in Quota.app")
+            fail("Collector spawn: collect-usage.mjs is missing from Quota.app")
             return
         }
         let node = ["/opt/homebrew/opt/node@24/bin/node", "/usr/local/opt/node@24/bin/node"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let node else { fail("Node 24 was not found in the existing Homebrew installation"); return }
+        guard let node else { fail("Collector spawn: Homebrew node@24 is not installed"); return }
         let task = Process()
         let output = Pipe()
         task.executableURL = URL(fileURLWithPath: node)
         task.arguments = [helper.path]
         task.standardInput = FileHandle.nullDevice
         task.standardOutput = output
-        task.standardError = FileHandle.nullDevice
+        task.standardError = CollectorLog.handle() ?? FileHandle.nullDevice
+        timedOut = false
         do {
             try task.run()
             process = task
         } catch {
-            fail("Could not start \(node): \(error.localizedDescription)")
+            fail("Collector spawn: could not start \(node): \(error.localizedDescription)")
             return
         }
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -162,34 +262,28 @@ final class UsageStore: ObservableObject {
             DispatchQueue.main.async {
                 guard let self, self.process === task else { return }
                 self.process = nil
-                guard task.terminationStatus == 0,
-                      let report = try? JSONDecoder().decode(UsageReport.self, from: data),
-                      Set(report.quotas.map(\.id)) == Set(Quota.placeholders.map(\.id)) else {
-                    self.fail("The usage collector did not return a complete result")
-                    return
+                switch UsageReport.decode(data, terminationStatus: task.terminationStatus, timedOut: self.timedOut) {
+                case .success(let report):
+                    self.quotas = report.merged(into: self.quotas, at: Date())
+                    for problem in Quota.problems(in: self.quotas) where problem.hasPrefix("Collector ") {
+                        CollectorLog.append(problem)
+                    }
+                    self.save()
+                case .failure(let failure):
+                    self.fail(failure.message)
                 }
-                self.quotas = report.quotas.map { fresh in
-                    guard fresh.status != "ready", var previous = self.quotas.first(where: { $0.id == fresh.id }) else { return fresh }
-                    previous.status = "unavailable"
-                    previous.error = fresh.error
-                    return previous
-                }
-                self.save()
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 35) { [weak self, weak task] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + UsageReport.timeout) { [weak self, weak task] in
             guard let task, self?.process === task, task.isRunning else { return }
+            self?.timedOut = true
             task.terminate()
         }
     }
 
     private func fail(_ message: String) {
-        quotas = quotas.map { item in
-            var item = item
-            item.status = "unavailable"
-            item.error = message
-            return item
-        }
+        CollectorLog.append(message)
+        quotas = quotas.map { $0.failed("unavailable", error: message, at: Date()) }
     }
 
     private func save() {
@@ -278,6 +372,7 @@ struct QuotaRow: View {
         .padding(.horizontal, 12)
         .frame(height: 36)
         .contentShape(Rectangle())
+        .help(quota.error ?? "")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(quota.accessibilityText(at: now))
     }
@@ -289,13 +384,20 @@ struct QuotaPanel: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
-            let groups = (0...2).map { group in store.quotas.filter { $0.group(at: timeline.date) == group } }.filter { !$0.isEmpty }
+            let quotas = store.installedQuotas
+            let groups = (0...2).map { group in quotas.filter { $0.group(at: timeline.date) == group } }.filter { !$0.isEmpty }
             VStack(spacing: 0) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, quotas in
                     if index > 0 {
                         Divider().padding(.horizontal, 12).padding(.vertical, 4)
                     }
                     ForEach(quotas) { quota in QuotaRow(quota: quota, now: timeline.date) }
+                }
+                if quotas.isEmpty {
+                    Text("未检测到已安装的服务")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 36)
                 }
             }
             .padding(.vertical, 5)
@@ -308,7 +410,7 @@ struct QuotaPanel: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let store = UsageStore()
     private var item: NSStatusItem!
     private let popover = NSPopover()
@@ -342,6 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         copyCommand.target = self
         let refreshCommand = commands.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r")
         refreshCommand.target = self
+        commands.addItem(diagnosticsItem())
         let quitCommand = commands.addItem(withTitle: "退出 Quota", action: #selector(quit), keyEquivalent: "q")
         quitCommand.target = self
         applicationItem.submenu = commands
@@ -360,8 +463,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func resize() {
-        let groups = Set(store.quotas.map { $0.group(at: Date()) }).count
-        popover.contentSize = NSSize(width: 336, height: 10 + store.quotas.count * 36 + max(0, groups - 1) * 9)
+        let quotas = store.installedQuotas
+        let groups = Set(quotas.map { $0.group(at: Date()) }).count
+        // An empty list shows one row-high message.
+        popover.contentSize = NSSize(width: 336, height: 10 + max(1, quotas.count) * 36 + max(0, groups - 1) * 9)
     }
 
     private func show() {
@@ -380,6 +485,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             copy.target = self
             let refresh = menu.addItem(withTitle: "刷新", action: #selector(refresh), keyEquivalent: "r")
             refresh.target = self
+            menu.addItem(diagnosticsItem())
             menu.addItem(.separator())
             let quit = menu.addItem(withTitle: "退出 Quota", action: #selector(quit), keyEquivalent: "q")
             quit.target = self
@@ -388,6 +494,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.menu = nil
         } else if popover.isShown { popover.performClose(nil) }
         else { show() }
+    }
+
+    private func diagnosticsItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "诊断", action: nil, keyEquivalent: "")
+        item.submenu = NSMenu()
+        item.submenu?.delegate = self
+        return item
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let problems = store.problems
+        // Items without an action render disabled, which suits read-only error lines.
+        for problem in problems.isEmpty ? ["没有错误"] : problems {
+            let line = menu.addItem(withTitle: problem.count > 90 ? problem.prefix(89) + "…" : problem, action: nil, keyEquivalent: "")
+            line.toolTip = problem
+        }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "打开日志", action: #selector(openLog), keyEquivalent: "").target = self
+    }
+
+    @objc private func openLog() {
+        if !NSWorkspace.shared.open(CollectorLog.url) { NSSound.beep() }
     }
 
     @objc private func copyUsageImage() {
