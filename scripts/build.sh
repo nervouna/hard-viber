@@ -12,6 +12,12 @@ xcrun swiftc -swift-version 5 -parse-as-library -O \
   -o "$app_dir/Contents/MacOS/Quota"
 
 cp "$project_dir/scripts/collect-usage.mjs" "$project_dir/scripts/claude-cache-probe.mjs" "$app_dir/Contents/Resources/"
+xcrun actool "$project_dir/Assets/Icon/Quota.icon" "$project_dir/Assets/MenuBar.xcassets" \
+  --compile "$app_dir/Contents/Resources" \
+  --platform macosx --target-device mac --minimum-deployment-target 14.0 \
+  --app-icon Quota --output-partial-info-plist "$project_dir/build/icon-info.plist" \
+  --output-format human-readable-text --warnings --errors
+
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -21,13 +27,15 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Quota</string>
   <key>CFBundleDisplayName</key><string>Quota</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.9</string>
-  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>11</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+
+/usr/libexec/PlistBuddy -c "Merge $project_dir/build/icon-info.plist" "$app_dir/Contents/Info.plist"
 
 codesign --force --sign - "$app_dir"
 printf '%s\n' "$app_dir"

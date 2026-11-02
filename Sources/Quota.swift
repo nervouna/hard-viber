@@ -315,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.accessory)
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            let image = NSImage(systemSymbolName: "chart.donut", accessibilityDescription: "Quota")
+            let image = NSImage(named: "MenuBarIcon")
                 ?? NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "Quota")
             image?.isTemplate = true
             image?.size = NSSize(width: 18, height: 18)
