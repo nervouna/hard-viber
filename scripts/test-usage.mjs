@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   collect, collectors, command, loadConfig, locate, normalizeAntigravity, normalizeClaude, normalizeGrok, normalizeKiro, normalizeOpenAI,
-  rpc, subscriptions, toolHome, version,
+  queryKiro, rpc, subscriptions, toolHome, version,
 } from './collect-usage.mjs';
 
 // Keep unlike billing windows distinct, and convert remaining into consumed usage.
@@ -45,6 +45,24 @@ const scripts = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-tool-'));
 const orphan = path.join(scripts, 'orphan');
 fs.writeFileSync(orphan, '#!/nonexistent/interpreter\n', { mode: 0o755 });
 await assert.rejects(command(orphan, []), error => error.stage === 'spawn' && error.missingPath === undefined && error.message === `${orphan}: ENOENT`);
+
+// Kiro without its container counts as not installed; a stopped container or service does not.
+const fakeContainer = (name, list, { listStatus = 0, execStatus = 1 } = {}) => {
+  const file = path.join(scripts, name);
+  fs.writeFileSync(file, `#!/bin/sh\ncase "$1" in\n  list) printf '${list}'; exit ${listStatus} ;;\n  exec) echo 'kiro output'; exit ${execStatus} ;;\nesac\n`, { mode: 0o755 });
+  return file;
+};
+await assert.rejects(queryKiro(fakeContainer('no-kiro', 'buildkit\\nother\\n')),
+  { stage: 'exit', missingPath: 'container kiro-docs', message: 'the kiro-docs container does not exist' });
+await assert.rejects(queryKiro(fakeContainer('stopped', 'buildkit\\nkiro-docs\\n')),
+  error => error.stage === 'exit' && error.missingPath === undefined && error.message === 'stopped exited with code 1');
+await assert.rejects(queryKiro(fakeContainer('no-service', '', { listStatus: 1 })),
+  error => error.stage === 'exit' && error.missingPath === undefined);
+assert.equal(await queryKiro(fakeContainer('running', 'kiro-docs\\n', { execStatus: 0 })), 'kiro output\n');
+await assert.rejects(queryKiro('/nonexistent/container'), { stage: 'spawn', missingPath: '/nonexistent/container' });
+// The configured container name decides both the exec and the not-installed check.
+await assert.rejects(queryKiro(fakeContainer('renamed', 'kiro-docs\\n'), { container: 'kiro-work' }),
+  { stage: 'exit', missingPath: 'container kiro-work', checkedPaths: ['container kiro-work'], message: 'the kiro-work container does not exist' });
 fs.rmSync(scripts, { recursive: true, force: true });
 await assert.rejects(command('/bin/sleep', ['5'], 100), { stage: 'timeout', message: 'no result within 0.1 s' });
 const server = reply => `require('readline').createInterface({ input: process.stdin }).on('line', line => {
@@ -78,7 +96,7 @@ assert.deepEqual(report.providers, ['claude', 'openai', 'antigravity', 'kiro', '
 assert.deepEqual(report.warnings, []);
 assert.ok(lines.includes('Kiro exit: sh exited with code 2\n  container failed'), 'The log keeps the child stderr tail');
 assert.match(lines.at(-1), /^1\/6 rows ready in \d+\.\d s$/);
-console.log('Collector failures passed: spawn, missing, exit, timeout, protocol, parse, per-provider rows, stderr tails.');
+console.log('Collector failures passed: spawn, missing, exit, timeout, protocol, parse, missing Kiro container, per-provider rows, stderr tails.');
 
 // config.json: a missing file means defaults; broken parts are ignored with a warning.
 const configs = fs.mkdtempSync(path.join(os.tmpdir(), 'quota-config-'));

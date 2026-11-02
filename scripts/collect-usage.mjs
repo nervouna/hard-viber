@@ -264,6 +264,25 @@ export function normalizeClaude(value) {
   throw new Error('No Claude weekly usage in the desktop cache');
 }
 
+// Kiro runs inside a container. Without the container Kiro counts as not installed, but only
+// when the container list says so: a stopped container or a stopped container service is an error.
+export async function queryKiro(executable, { container = 'kiro-docs', user = 'kiro', workdir = '/home/kiro/workspace' } = {}) {
+  try {
+    return await command(executable, [
+      'exec', '-i', '--user', user, '--workdir', workdir,
+      container, '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
+    ]);
+  } catch (error) {
+    if (error.stage !== 'exit') throw error;
+    let ids;
+    try { ids = (await command(executable, ['list', '--all', '--quiet'], 10000)).split(/\s+/); }
+    catch { throw error; }
+    if (ids.includes(container)) throw error;
+    throw new CollectorError('exit', `the ${container} container does not exist`,
+      { missingPath: `container ${container}`, checkedPaths: [`container ${container}`], stderr: error.stderr });
+  }
+}
+
 // Matches the Claude freshness window in Quota.swift.
 const claudeWindow = 1800 * 1000;
 
@@ -343,10 +362,7 @@ export const collectors = {
     parse: normalizeAntigravity,
   },
   kiro: {
-    query: ({ executable, container = 'kiro-docs', user = 'kiro', workdir = '/home/kiro/workspace' }) => command(locate('container', executable), [
-      'exec', '-i', '--user', user, '--workdir', workdir,
-      container, '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
-    ]),
+    query: ({ executable, ...settings }) => queryKiro(locate('container', executable), settings),
     parse: normalizeKiro,
   },
 };

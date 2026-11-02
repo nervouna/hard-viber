@@ -1,5 +1,5 @@
 import AppKit
-import CoreText
+import CoreImage
 import SwiftUI
 
 @MainActor
@@ -12,8 +12,8 @@ enum QuotaImageExporter {
 
     static func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
         let quotas = orderedQuotas(quotas, at: date)
-        guard !quotas.isEmpty, let artwork = QuotaImageArtwork.shared else { return nil }
-        let view = QuotaImageView(quotas: quotas, date: date, artwork: artwork)
+        guard !quotas.isEmpty, let mascot = QuotaImageArtwork.mascot else { return nil }
+        let view = QuotaImageView(summary: QuotaImageSummary(quotas, at: date), mascot: mascot)
             .environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
@@ -44,223 +44,427 @@ extension Quota {
     }
 }
 
-private struct QuotaImageArtwork {
-    let paper: NSImage
-    let mascot: NSImage
-    let title: NSImage
-    let titleInkHeight: CGFloat
+/// What the cover says about the rows. Stale and unavailable rows are unknown, never exhausted.
+struct QuotaImageSummary {
+    enum Mood { case exhausted, low, healthy, unknown }
 
-    static let shared: QuotaImageArtwork? = {
+    let quotas: [Quota]
+    let date: Date
+    let exhausted: [Quota]
+    let low: [Quota]
+    let unknown: [Quota]
+    let live: [Quota]
+
+    init(_ quotas: [Quota], at date: Date) {
+        self.quotas = quotas
+        self.date = date
+        exhausted = quotas.filter { $0.group(at: date) == 1 }
+        unknown = quotas.filter { $0.group(at: date) == 2 }
+        live = quotas.filter { $0.group(at: date) == 0 }
+        // The same band that `quotaColor` draws red in the menu.
+        low = live.filter { ($0.remainingPercent ?? 0) <= 20 }
+    }
+
+    var mood: Mood {
+        if !exhausted.isEmpty { return .exhausted }
+        if !low.isEmpty { return .low }
+        return live.isEmpty ? .unknown : .healthy
+    }
+
+    /// Picks one of a few lines for the situation; the exporter rotates them by day.
+    func headline(variant: Int) -> String {
+        let single = quotas.count == 1 ? quotas[0].name : nil
+        let lines: [String]
+        if live.isEmpty && exhausted.isEmpty {
+            lines = single.map { ["\($0) went quiet.", "\($0) isn't talking."] }
+                ?? ["Radio silence.", "Nobody's answering.", "The numbers ghosted us."]
+        } else if live.isEmpty && unknown.isEmpty {
+            lines = single.map { ["\($0) is cooked.", "\($0) is fried.", "\($0) has left the chat."] }
+                ?? ["Everything is fried.", "Total meltdown.", "Nothing left to vibe with."]
+        } else if exhausted.count > 1 {
+            lines = ["The vibes have casualties.", "Somebody vibed way too hard.", "Dropping like flies."]
+        } else if exhausted.count == 1 {
+            lines = ["Somebody vibed too hard.", "Well, that one's toast.", "One down. Still vibing."]
+        } else if !low.isEmpty {
+            lines = single.map { ["\($0) is on fumes.", "Pace yourself, \($0)."] }
+                ?? ["Something's running on fumes.", "Pace yourself. Or don't.", "Low-battery energy."]
+        } else if unknown.isEmpty && live.allSatisfy({ $0.remainingPercent == 100 }) {
+            lines = ["Fully charged. Suspiciously.", "Not a single token spent.", "Untouched. Who even are you?"]
+        } else {
+            lines = ["Plenty left. Vibe on.", "Still in the green.", "Room to vibe."]
+        }
+        return lines[abs(variant) % lines.count]
+    }
+
+    var deck: String {
+        if quotas.count == 1 {
+            let quota = quotas[0]
+            switch quota.group(at: date) {
+            case 1: return "0% left. Back in \(quota.resetText(at: date, english: true))."
+            case 2: return "No fresh numbers. Unknown, not dead."
+            default: return "\(quota.percentageText) left. Resets in \(quota.resetText(at: date, english: true))."
+            }
+        }
+        let words = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"]
+        func count(_ value: Int) -> String { value < words.count ? words[value] : "\(value)" }
+        var sentences: [String] = []
+        // Only the first sentence names the noun: "One plan is dead. Two are on fumes."
+        func add(_ rows: [Quota], _ singular: String, _ plural: String) {
+            guard !rows.isEmpty else { return }
+            let noun = sentences.isEmpty ? (rows.count == 1 ? " plan" : " plans") : ""
+            sentences.append("\(count(rows.count))\(noun) \(rows.count == 1 ? singular : plural)")
+        }
+        add(exhausted, "is dead.", "are dead.")
+        add(low, "is on fumes.", "are on fumes.")
+        if unknown.count == quotas.count {
+            return "None of the \(count(quotas.count).lowercased()) plans reported back."
+        }
+        add(unknown, "didn't report back.", "didn't report back.")
+        if !sentences.isEmpty { return sentences.joined(separator: " ") }
+        if live.allSatisfy({ $0.remainingPercent == 100 }) { return "\(count(quotas.count)) plans, all at 100%." }
+        let lowest = live.min { ($0.remainingPercent ?? 0) < ($1.remainingPercent ?? 0) }!
+        return "\(count(quotas.count)) plans. Lowest: \(lowest.name) at \(lowest.percentageText)."
+    }
+}
+
+@MainActor
+private enum QuotaImageArtwork {
+    /// The mascot as a die-cut sticker: a white border grown from its alpha channel.
+    static let mascot: NSImage? = {
         #if TESTING
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Assets/UsageImage")
         #else
         guard let directory = Bundle.main.resourceURL else { return nil }
         #endif
-        guard let paper = NSImage(contentsOf: directory.appendingPathComponent("SharePaper.png")),
-              let mascot = NSImage(contentsOf: directory.appendingPathComponent("ShareMascot.png")) else { return nil }
-
-        // Crop to the real glyph bounds so the illustration can match ink height,
-        // independently of the font's ascender and line-spacing metrics.
-        let font = NSFont(name: "BradleyHandITCTT-Bold", size: 68) ?? NSFont.systemFont(ofSize: 68)
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "Oops, I vibed again.",
-            attributes: [.font: font, .foregroundColor: NSColor.black]))
-        let bounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
-        let size = CGSize(width: ceil(bounds.width) + 2, height: ceil(bounds.height) + 2)
-        guard let context = CGContext(data: nil, width: Int(size.width * 2), height: Int(size.height * 2),
-                                      bitsPerComponent: 8, bytesPerRow: Int(size.width * 2) * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.scaleBy(x: 2, y: 2)
-        context.textPosition = CGPoint(x: 1 - bounds.minX, y: 1 - bounds.minY)
-        CTLineDraw(line, context)
-        guard let cgImage = context.makeImage() else { return nil }
-        return QuotaImageArtwork(paper: paper, mascot: mascot,
-                                 title: NSImage(cgImage: cgImage, size: size), titleInkHeight: bounds.height)
+        guard let source = CIImage(contentsOf: directory.appendingPathComponent("ShareMascot.png")) else { return nil }
+        let border = (source.extent.height * 0.034).rounded()
+        let canvas = source.extent.insetBy(dx: -border, dy: -border)
+        let outline = CIImage(color: .white).cropped(to: canvas).applyingFilter("CIBlendWithAlphaMask", parameters: [
+            kCIInputBackgroundImageKey: CIImage.empty(),
+            kCIInputMaskImageKey: source.applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: border]),
+        ])
+        guard let image = CIContext().createCGImage(source.composited(over: outline), from: canvas) else { return nil }
+        return NSImage(cgImage: image, size: canvas.size)
     }()
 }
 
-private struct QuotaImageView: View {
-    let quotas: [Quota]
-    let date: Date
-    let artwork: QuotaImageArtwork
-    private let columnWidth: CGFloat = 736 / 3
+private enum Palette {
+    static let orange = Color(red: 1, green: 0x5B / 255, blue: 0x1A / 255)
+    static let yellow = Color(red: 1, green: 0xD2 / 255, blue: 0x1F / 255)
+    static let lime = Color(red: 0xC6 / 255, green: 0xF4 / 255, blue: 0x3A / 255)
+    static let fog = Color(white: 0.80)
+    static let ink = Color(white: 0.04)
+    static let panel = Color(white: 0.055)
+    static let dim = Color(white: 0.58)
+    static let faint = Color(white: 0.36)
+    static let track = Color(white: 0.20)
 
-    private var timestamp: String {
+    static func cover(_ mood: QuotaImageSummary.Mood) -> Color {
+        switch mood {
+        case .exhausted: orange
+        case .low: yellow
+        case .healthy: lime
+        case .unknown: fog
+        }
+    }
+}
+
+private enum Typeface {
+    /// Percentages: SF Pro Compressed Black.
+    static func figures(_ size: CGFloat) -> NSFont {
+        NSFont.systemFont(ofSize: size, weight: .black, width: .compressed)
+    }
+
+    static func helvetica(_ size: CGFloat, _ face: String = "CondensedBlack") -> NSFont {
+        NSFont(name: "HelveticaNeue-\(face)", size: size) ?? .systemFont(ofSize: size, weight: .heavy, width: .condensed)
+    }
+
+    /// The largest size at which every value fits `width`, so all rows share one size.
+    static func figureSize(for values: [String], width: CGFloat, maximum: CGFloat) -> CGFloat {
+        let probe = figures(100)
+        let widest = values.map { ($0 as NSString).size(withAttributes: [.font: probe]).width }.max() ?? 1
+        return min(maximum, floor(width / widest * 97))
+    }
+}
+
+private struct QuotaImageView: View {
+    let summary: QuotaImageSummary
+    let mascot: NSImage
+    private let fieldWidth: CGFloat = 372
+
+    private var dateLine: String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy.MM.dd HH:mm"
-        return formatter.string(from: date)
+        formatter.dateFormat = "MMM d, yyyy · HH:mm"
+        return formatter.string(from: summary.date).uppercased()
     }
 
     var body: some View {
-        let rowCount = (quotas.count + 2) / 3
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Image(nsImage: artwork.title)
-                Spacer(minLength: 24)
-                Image(nsImage: artwork.mascot)
-                    .resizable().interpolation(.high).scaledToFit()
-                    .frame(height: artwork.titleInkHeight * 1.1)
-                    // The smoke is light; align the body rather than its full bounds.
-                    .offset(y: -12)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 140)
-            .overlay(alignment: .bottom) { SketchRule().frame(height: 2) }
-
-            VStack(spacing: 0) {
-                ForEach(0..<rowCount, id: \.self) { row in
-                    HStack(spacing: 0) {
-                        ForEach(0..<3) { column in
-                            let index = row * 3 + column
-                            Group {
-                                if index < quotas.count {
-                                    QuotaImageCell(quota: quotas[index], date: date)
-                                } else { Color.clear }
-                            }
-                            .padding(.leading, column == 0 ? 8 : 20)
-                            .padding(.trailing, 12)
-                            .frame(width: columnWidth, height: 162)
-                        }
-                    }
-                    .overlay(alignment: .bottom) { SketchRule().frame(height: 2) }
+        let field = Palette.cover(summary.mood)
+        let day = Calendar.current.ordinality(of: .day, in: .year, for: summary.date) ?? 0
+        let headline = Headline(summary.headline(variant: day), width: fieldWidth - 56, height: 290, maximum: 104)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Text("QUOTA WEEKLY")
+                        .font(Font(Typeface.helvetica(17)))
+                        .tracking(1.2)
+                        .foregroundStyle(field)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Palette.ink)
+                    Text(dateLine)
+                        .font(Font(Typeface.helvetica(14, "Bold")))
+                        .tracking(0.6)
                 }
+                Rectangle().frame(height: 3).padding(.top, 12)
+                headline.padding(.top, 18)
+                Text(summary.deck)
+                    .font(Font(Typeface.helvetica(21, "Bold")))
+                    .lineSpacing(1)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Leaves the lower right corner to the mascot.
+                    .frame(width: fieldWidth - 190, alignment: .leading)
+                    .padding(.top, 14)
+                Spacer(minLength: 0)
             }
-            .overlay(alignment: .topLeading) {
-                // A column rule runs only through the rows that have a cell on both sides.
-                ForEach(1..<3) { column in
-                    let rows = (quotas.count - column + 2) / 3
-                    if rows > 0 {
-                        SketchRule(vertical: true)
-                            .frame(width: 2, height: CGFloat(rows) * 162 - 20)
-                            .offset(x: CGFloat(column) * columnWidth - 1, y: 10)
-                    }
-                }
-            }
+            .foregroundStyle(Palette.ink)
+            .padding([.horizontal, .top], 28)
+            .frame(width: fieldWidth, height: 512, alignment: .topLeading)
+            .background(field)
 
-            Text(timestamp)
-                .font(.system(size: 16, weight: .medium, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(Color(white: 0.43))
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .frame(height: 48)
+            QuotaImageRows(summary: summary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Palette.panel)
         }
-        .padding(.horizontal, 32)
-        .frame(width: 800)
-        .background { Image(nsImage: artwork.paper).resizable().scaledToFill() }
+        .frame(width: 800, height: 512)
+        .overlay(alignment: .bottomLeading) {
+            Image(nsImage: mascot)
+                .resizable().interpolation(.high).scaledToFit()
+                .frame(height: 150)
+                .shadow(color: .black.opacity(0.85), radius: 0, x: 5, y: 6)
+                .rotationEffect(.degrees(-8))
+                .offset(x: fieldWidth - 150, y: -14)
+        }
         .clipped()
     }
 }
 
-private struct QuotaImageCell: View {
-    let quota: Quota
-    let date: Date
+/// A headline set as large as fits the box, with tight leading and a balanced rag.
+private struct Headline: View {
+    let lines: [String]
+    let font: NSFont
+    private static let leading: CGFloat = 0.86
+
+    init(_ text: String, width: CGFloat, height: CGFloat, maximum: CGFloat) {
+        let words = text.split(separator: " ").map(String.init)
+        func measure(_ line: String, _ font: NSFont) -> CGFloat {
+            (line as NSString).size(withAttributes: [.font: font]).width
+        }
+        func wrap(_ font: NSFont, _ width: CGFloat) -> [String] {
+            words.reduce(into: []) { lines, word in
+                if let last = lines.last, measure(last + " " + word, font) <= width {
+                    lines[lines.count - 1] = last + " " + word
+                } else {
+                    lines.append(word)
+                }
+            }
+        }
+        var size = maximum
+        while true {
+            let font = Typeface.helvetica(size)
+            var lines = wrap(font, width)
+            // Narrow the measure while the line count holds, but never below the longest word.
+            var rag = width
+            let longestWord = words.map { measure($0, font) }.max() ?? 0
+            while rag - 4 >= longestWord, wrap(font, rag - 4).count == lines.count { rag -= 4 }
+            lines = wrap(font, rag)
+            let natural = font.ascender - font.descender + font.leading
+            let blockHeight = natural + CGFloat(lines.count - 1) * size * Self.leading
+            if (lines.count <= 4 && blockHeight <= height && lines.allSatisfy({ measure($0, font) <= width })) || size <= 24 {
+                self.lines = lines
+                self.font = font
+                return
+            }
+            size -= 2
+        }
+    }
 
     var body: some View {
-        let group = quota.group(at: date)
-        let primary = Color(white: group == 0 ? 0.04 : 0.61)
-        let secondary = Color(white: group == 0 ? 0.39 : 0.61)
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(quota.name)
-                    .font(.system(size: 25, weight: .bold, design: .rounded))
-                    .foregroundStyle(primary)
-                Text(quota.compactSubtitle)
-                    .font(.system(size: 16.5, weight: .medium, design: .rounded))
-                    .foregroundStyle(secondary)
-                    .minimumScaleFactor(0.8)
+        let natural = font.ascender - font.descender + font.leading
+        VStack(alignment: .leading, spacing: font.pointSize * Self.leading - natural) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line).font(Font(font)).fixedSize()
             }
-            .frame(maxWidth: .infinity, minHeight: 55, alignment: .topLeading)
+        }
+    }
+}
 
-            HStack(spacing: 12) {
-                SketchQuotaRing(quota: quota, group: group)
-                    .frame(width: 76, height: 76)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(group == 2 ? "—" : quota.percentageText)
-                        .font(.system(size: 45, weight: .heavy, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(primary)
-                        .minimumScaleFactor(0.62)
-                    Text(group == 2 ? "—" : quota.resetText(at: date, english: true))
-                        .font(.system(size: 19, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(secondary)
-                        .minimumScaleFactor(0.8)
+private struct QuotaImageRows: View {
+    let summary: QuotaImageSummary
+
+    var body: some View {
+        let quotas = summary.quotas
+        let values = quotas.map { Readout($0, at: summary.date).value }
+        if quotas.count == 1 {
+            SingleRow(readout: Readout(quotas[0], at: summary.date),
+                      figureSize: Typeface.figureSize(for: values, width: 376, maximum: 300))
+                .padding(.horizontal, 26)
+                .padding(.vertical, 28)
+        } else {
+            let height = (512 - 36) / CGFloat(quotas.count)
+            let scale: CGFloat = quotas.count <= 3 ? 1.3 : 1
+            let size = Typeface.figureSize(for: values, width: 210, maximum: min(height * 0.95, 170))
+            VStack(spacing: 0) {
+                ForEach(quotas) { quota in
+                    Row(readout: Readout(quota, at: summary.date), height: height, figureSize: size, scale: scale)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(.horizontal, 26)
+            .padding(.vertical, 18)
+        }
+    }
+}
+
+/// How one row reads: exhausted rows say so in words as well as in orange.
+private struct Readout {
+    let quota: Quota
+    let group: Int
+    let value: String
+    let tag: String?
+    let color: Color
+    let reset: String
+
+    init(_ quota: Quota, at date: Date) {
+        self.quota = quota
+        group = quota.group(at: date)
+        switch group {
+        case 1: (value, tag, color) = ("0%", "DEAD", Palette.orange)
+        case 2: (value, tag, color) = ("—", "NO SIGNAL", Palette.faint)
+        default: (value, tag, color) = (quota.percentageText, nil, .white)
+        }
+        reset = group == 2 ? "RESET UNKNOWN" : "RESETS IN " + quota.resetText(at: date, english: true).uppercased()
+    }
+
+    var nameColor: Color { group == 0 ? .white : Palette.dim }
+}
+
+private struct Row: View {
+    let readout: Readout
+    let height: CGFloat
+    let figureSize: CGFloat
+    let scale: CGFloat
+
+    var body: some View {
+        let figures = Typeface.figures(figureSize)
+        let resetFont = Typeface.helvetica(12.5 * scale, "Bold")
+        VStack(spacing: 6 * scale) {
+            // Both columns drop their descent so the figures stand on the bar.
+            HStack(alignment: .lastTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3 * scale) {
+                    HStack(spacing: 7 * scale) {
+                        Text(readout.quota.name.uppercased())
+                            .font(Font(Typeface.helvetica(23 * scale)))
+                            .tracking(0.4)
+                            .foregroundStyle(readout.nameColor)
+                        if let tag = readout.tag { Tag(text: tag, filled: readout.group == 1, size: 13 * scale) }
+                    }
+                    Text(readout.quota.compactSubtitle)
+                        .font(Font(Typeface.helvetica(15 * scale, "Medium")))
+                        .foregroundStyle(Palette.dim)
+                    Text(readout.reset)
+                        .font(Font(resetFont))
+                        .tracking(0.6)
+                        .foregroundStyle(Palette.faint)
+                        .padding(.bottom, resetFont.descender)
+                }
+                .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(readout.value)
+                    .font(Font(figures))
+                    .foregroundStyle(readout.color)
+                    .fixedSize()
+                    .padding(.bottom, figures.descender)
+            }
+            Bar(readout: readout, thickness: 3 * scale)
+        }
+        .padding(.bottom, height * 0.13)
+        .frame(height: height, alignment: .bottom)
+    }
+}
+
+private struct SingleRow: View {
+    let readout: Readout
+    let figureSize: CGFloat
+
+    var body: some View {
+        let figures = Typeface.figures(figureSize)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text(readout.quota.name.uppercased())
+                    .font(Font(Typeface.helvetica(40)))
+                    .foregroundStyle(readout.nameColor)
+                if let tag = readout.tag { Tag(text: tag, filled: readout.group == 1, size: 20) }
+            }
+            Text(readout.quota.compactSubtitle)
+                .font(Font(Typeface.helvetica(24, "Medium")))
+                .foregroundStyle(Palette.dim)
+            Spacer(minLength: 0)
+            Text(readout.value)
+                .font(Font(figures))
+                .foregroundStyle(readout.color)
+                .fixedSize()
+                .padding(.bottom, figures.descender)
+            Bar(readout: readout, thickness: 6).padding(.top, 10)
+            Text(readout.reset)
+                .font(Font(Typeface.helvetica(18, "Bold")))
+                .tracking(0.8)
+                .foregroundStyle(Palette.faint)
+                .padding(.top, 12)
         }
         .lineLimit(1)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.top, 12)
     }
 }
 
-private struct SketchRule: View {
-    var vertical = false
+private struct Tag: View {
+    let text: String
+    let filled: Bool
+    let size: CGFloat
 
     var body: some View {
-        Canvas { context, size in
-            let length = vertical ? size.height : size.width
-            var path = Path()
-            for step in 0...Int(ceil(length / 2)) {
-                let distance = min(length, CGFloat(step) * 2)
-                let wobble = 1 + 0.18 * sin(distance * 1.7) + 0.12 * sin(distance * 0.37)
-                let point = vertical ? CGPoint(x: wobble, y: distance) : CGPoint(x: distance, y: wobble)
-                if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-            context.stroke(path, with: .color(Color(white: 0.47).opacity(0.7)), lineWidth: 0.7)
-        }
+        Text(text)
+            .font(Font(Typeface.helvetica(size)))
+            .tracking(0.8)
+            .foregroundStyle(filled ? Palette.ink : Palette.dim)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(filled ? Palette.orange : .clear)
+            .overlay { if !filled { Rectangle().strokeBorder(Palette.faint, lineWidth: 1.5) } }
     }
 }
 
-private struct SketchQuotaRing: View {
-    let quota: Quota
-    let group: Int
+/// Remaining quota as a bar; a dashed rule when the value is unknown.
+private struct Bar: View {
+    let readout: Readout
+    let thickness: CGFloat
 
     var body: some View {
-        Canvas { context, size in
-            let width: CGFloat = 7.5
-            let radius = (min(size.width, size.height) - width) / 2 - 1
-            let center = CGPoint(x: size.width / 2, y: size.height / 2)
-            func arc(from start: Double, to end: Double) -> Path {
-                var path = Path()
-                let steps = max(1, Int(ceil((end - start) * 128)))
-                for step in 0...steps {
-                    let angle = (start + (end - start) * Double(step) / Double(steps)) * 2 * .pi - .pi / 2
-                    let r = radius + 0.55 * sin(angle * 7) + 0.23 * sin(angle * 19) + 0.11 * sin(angle * 43)
-                    let point = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
-                    if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        GeometryReader { proxy in
+            if readout.group == 2 {
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: thickness / 2))
+                    path.addLine(to: CGPoint(x: proxy.size.width, y: thickness / 2))
                 }
-                if start == 0, end == 1 { path.closeSubpath() }
-                return path
-            }
-            let color = quotaColor(for: group, remaining: quota.remainingPercent)
-            let track = arc(from: 0, to: 1)
-            let stroke = StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
-            context.stroke(track, with: .color(color.opacity(0.19)), style: stroke)
-            if group == 0, let remaining = quota.remainingPercent, remaining > 0 {
-                let fraction = min(1, remaining / 100)
-                let cap = width / (4 * .pi * radius)
-                let start = fraction == 1 ? 0 : min(cap, fraction / 2)
-                let end = fraction == 1 ? 1 : max(start + 0.00001, fraction - cap)
-                context.stroke(arc(from: start, to: end), with: .color(color), style: stroke)
-            }
-            // Fixed paper flecks give the live chart a crayon texture without
-            // changing its measured arc or making repeated exports flicker.
-            context.clip(to: track.strokedPath(stroke))
-            var seed: UInt64 = 4287
-            func random() -> Double {
-                seed = seed &* 6364136223846793005 &+ 1442695040888963407
-                return Double((seed >> 32) & 0xffff) / 65535
-            }
-            for _ in 0..<1900 {
-                let x = random() * size.width, y = random() * size.height
-                let diameter = 0.2 + random() * 0.65
-                context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: diameter, height: diameter)),
-                             with: .color(Color(white: 0.97).opacity(0.6)))
+                .stroke(Palette.faint, style: StrokeStyle(lineWidth: thickness, dash: [3, 4]))
+            } else {
+                let remaining = readout.group == 1 ? 0 : readout.quota.remainingPercent ?? 0
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(Palette.track)
+                    Rectangle().fill(remaining <= 20 ? Palette.orange : .white)
+                        .frame(width: proxy.size.width * remaining / 100)
+                }
             }
         }
+        .frame(height: thickness)
     }
 }
