@@ -34,7 +34,7 @@ The app merges the report row by row:
 - A successful row replaces the old one.
 - A failed row keeps its last good value and records the error. It stays current until the freshness window passes (15 minutes; 30 minutes for Claude, whose cache only updates while Claude Desktop runs), then turns grey and moves to the bottom group.
 - A row missing from the report is treated as failed. Other rows are unaffected.
-- A row whose tool is not installed is hidden from the list and from the shareable image once its last good value is stale. Only a clear signal counts: the executable does not exist, or, for Claude, `plan-usage-history.json` does not exist. Every other failure keeps the row visible with its reason.
+- A row whose tool is not installed is hidden from the list and from the shareable image once its last good value is stale. Only a clear signal counts: the executable does not exist, the `kiro-docs` container does not exist, or, for Claude, `plan-usage-history.json` does not exist. Every other failure keeps the row visible with its reason.
 
 The last merged state is cached in `~/Library/Application Support/Quota/usage.json`, so the list is not empty after a restart.
 
@@ -45,7 +45,7 @@ The last merged state is cached in `~/Library/Application Support/Quota/usage.js
 | Claude | Claude Desktop's local data: `plan-usage-history.json` and the cached `claude.ai/api/organizations/<org>/usage` responses in its Chromium HTTP cache (`scripts/claude-cache-probe.mjs`) | Claude Desktop signed in and run recently. Read-only; no network, Keychain or cookie access. Without a cached response it falls back to the last history sample, which has no reset time. Not installed means `~/Library/Application Support/Claude/plan-usage-history.json` does not exist. |
 | OpenAI | `codex app-server` bundled in `/Applications/ChatGPT.app`, JSON-RPC `account/rateLimits/read`, weekly window | Codex signed in. Uses `~/.local/share/codex` as `CODEX_HOME` when it exists and `CODEX_HOME` is unset. |
 | Antigravity (Gemini, Claude + GPT) | `/opt/homebrew/bin/agy -p /usage`, the two "Weekly Limit Remaining" pools | The Antigravity CLI signed in, with its data in `~/Library/Application Support/AntigravityCLI`. The CLI does not report the plan; Google AI Pro is set in `subscriptions.json`. |
-| Kiro | `kiro-cli chat --no-interactive /usage`, run as user `kiro` in the `kiro-docs` container through `/opt/homebrew/bin/container exec` | Apple's `container` tool and a running `kiro-docs` container with Kiro signed in. Monthly cycle with a date-only reset. A missing `container` executable hides the row; a missing or stopped `kiro-docs` container shows the row with an `exit` error. |
+| Kiro | `kiro-cli chat --no-interactive /usage`, run as user `kiro` in the `kiro-docs` container through `/opt/homebrew/bin/container exec` | Apple's `container` tool and a running `kiro-docs` container with Kiro signed in. Monthly cycle with a date-only reset. A missing `container` executable or `kiro-docs` container hides the row. A stopped container, or a container service that is not running, shows the row with an `exit` error. |
 | Grok | `/opt/homebrew/bin/grok agent --no-leader stdio`, JSON-RPC `_x.ai/billing`, weekly period | The Grok CLI signed in. |
 
 ## Diagnostics
