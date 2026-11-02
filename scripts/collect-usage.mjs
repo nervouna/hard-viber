@@ -5,23 +5,31 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { snapshot as claudeSnapshot } from './claude-cache-probe.mjs';
 
-export const subscriptions = [
-  { id: 'claude', provider: 'claude', name: 'Claude', cycle: 'weekly' },
-  { id: 'openai', provider: 'openai', name: 'OpenAI', cycle: 'weekly' },
-  // The CLI does not expose the plan; Google AI Pro was confirmed by the user.
-  { id: 'antigravity-gemini', provider: 'antigravity', name: 'Antigravity', cycle: 'weekly', plan: 'Google AI Pro', bucket: 'Gemini' },
-  { id: 'antigravity-claude', provider: 'antigravity', name: 'Antigravity', cycle: 'weekly', plan: 'Google AI Pro', bucket: 'Claude + GPT' },
-  { id: 'kiro', provider: 'kiro', name: 'Kiro', cycle: 'monthly' },
-  { id: 'grok', provider: 'grok', name: 'Grok', cycle: 'weekly' },
-];
+// The app reads the same file, so the rows and their labels are defined once.
+export const subscriptions = JSON.parse(fs.readFileSync(new URL('./subscriptions.json', import.meta.url), 'utf8'));
 
 const children = new Set();
+const waiting = new Set();
 const home = os.homedir();
 const environment = {
   ...process.env,
   PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${process.env.PATH ?? ''}`,
   NO_COLOR: '1', TERM: 'dumb',
 };
+
+// Stages: spawn, timeout, exit, protocol, read, parse. `missingPath` marks a tool that is not
+// installed and names the path that was checked; the app hides such rows.
+export class CollectorError extends Error {
+  constructor(stage, message, details = {}) {
+    super(message);
+    Object.assign(this, { stage }, details);
+  }
+}
+
+// The app appends stderr to ~/Library/Logs/Quota/collector.log.
+function log(message) {
+  process.stderr.write(`${new Date().toISOString()} ${message}\n`);
+}
 
 function stop(child) {
   if (!child?.pid) return;
@@ -33,37 +41,51 @@ function stop(child) {
 
 function start(executable, args, extraEnvironment = {}) {
   const child = spawn(executable, args, {
-    cwd: home, detached: true, stdio: ['pipe', 'pipe', 'ignore'],
+    cwd: home, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...environment, ...extraEnvironment },
   });
   children.add(child);
+  // Drain stderr so a chatty child cannot block; keep the tail for failure reports.
+  child.stderrTail = '';
+  child.stderr.on('data', data => { child.stderrTail = (child.stderrTail + data.toString()).slice(-1000); });
   child.stdin.on('error', () => {});
   child.once('close', () => children.delete(child));
   return child;
 }
 
-function command(executable, args) {
+function spawnError(executable, error) {
+  // ENOENT also means a script's interpreter is missing; only a missing file means not installed.
+  if (error.code === 'ENOENT' && !fs.existsSync(executable)) {
+    return new CollectorError('spawn', `${executable} is not installed`, { missingPath: executable });
+  }
+  return new CollectorError('spawn', `${executable}: ${error.code ?? error.message}`);
+}
+
+export function command(executable, args, timeout = 25000) {
   return new Promise((resolve, reject) => {
     const child = start(executable, args);
     let output = '';
-    const timer = setTimeout(() => { stop(child); reject(new Error('Query timed out')); }, 25000);
+    const timer = setTimeout(() => {
+      stop(child);
+      reject(new CollectorError('timeout', `no result within ${timeout / 1000} s`, { stderr: child.stderrTail }));
+    }, timeout);
     child.stdout.on('data', data => {
       output += data.toString();
-      if (output.length > 2 * 1024 * 1024) { stop(child); reject(new Error('Unexpected output size')); }
+      if (output.length > 2 * 1024 * 1024) { stop(child); reject(new CollectorError('protocol', 'unexpected output size')); }
     });
-    child.once('error', error => { clearTimeout(timer); reject(new Error(`${path.basename(executable)}: ${error.code}`)); });
+    child.once('error', error => { clearTimeout(timer); reject(spawnError(executable, error)); });
     child.once('close', code => {
       clearTimeout(timer);
       if (code === 0) resolve(output.replace(/\x1b\[[0-9;]*[A-Za-z]/g, ''));
-      else reject(new Error(`${path.basename(executable)} exited with ${code}`));
+      else reject(new CollectorError('exit', `${path.basename(executable)} exited with code ${code}`, { stderr: child.stderrTail }));
     });
     child.stdin.end();
   });
 }
 
-function rpc(executable, args, initialize, method, params = {}, extraEnvironment = {}) {
+export function rpc(executable, args, initialize, method, params = {}, { env = {}, timeout = 25000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = start(executable, args, extraEnvironment);
+    const child = start(executable, args, env);
     let pending = '', complete = false;
     const finish = (error, result) => {
       if (complete) return;
@@ -74,19 +96,24 @@ function rpc(executable, args, initialize, method, params = {}, extraEnvironment
       error ? reject(error) : resolve(result);
     };
     const send = message => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
-    const timer = setTimeout(() => finish(new Error('Query timed out')), 25000);
-    child.once('error', error => finish(new Error(`${path.basename(executable)}: ${error.code}`)));
-    child.once('close', code => { if (!complete) finish(new Error(`${path.basename(executable)} exited with ${code}`)); });
+    const timer = setTimeout(() => finish(new CollectorError('timeout', `no reply to ${method} within ${timeout / 1000} s`, { stderr: child.stderrTail })), timeout);
+    child.once('error', error => finish(spawnError(executable, error)));
+    child.once('close', code => {
+      if (!complete) finish(new CollectorError('exit', `${path.basename(executable)} exited with code ${code} before replying`, { stderr: child.stderrTail }));
+    });
     child.stdout.on('data', data => {
       pending += data.toString();
-      if (pending.length > 2 * 1024 * 1024) return finish(new Error('Unexpected output size'));
+      if (pending.length > 2 * 1024 * 1024) return finish(new CollectorError('protocol', 'unexpected output size'));
       let newline;
       while ((newline = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
         let response;
         try { response = JSON.parse(line); } catch { continue; }
         if (response.id !== 1 && response.id !== 2) continue;
-        if (response.error) return finish(new Error(`Query failed (${response.error.code})`));
+        if (response.error) {
+          const detail = typeof response.error.message === 'string' ? `: ${response.error.message.slice(0, 200)}` : '';
+          return finish(new CollectorError('protocol', `${response.id === 1 ? 'initialize' : method} failed (${response.error.code}${detail})`, { stderr: child.stderrTail }));
+        }
         if (response.id === 1) {
           if (method === 'account/rateLimits/read') send({ method: 'initialized', params: {} });
           send({ id: 2, method, params });
@@ -159,47 +186,94 @@ export function normalizeClaude(value) {
   throw new Error('No Claude weekly usage in the desktop cache');
 }
 
+const claudeDirectory = path.join(home, 'Library/Application Support/Claude');
+const claudeHistory = '~/Library/Application Support/Claude/plan-usage-history.json';
+
 const collectors = {
-  claude: async () => normalizeClaude(claudeSnapshot()),
-  openai: async () => {
-    const canonicalHome = path.join(home, '.local/share/codex');
-    const codexEnvironment = !process.env.CODEX_HOME && fs.existsSync(canonicalHome) ? { CODEX_HOME: canonicalHome } : {};
-    return normalizeOpenAI(await rpc(
-      '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', ['app-server'],
-      { clientInfo: { name: 'quota', version: '0.1.0' }, capabilities: { experimentalApi: true } },
-      'account/rateLimits/read', {}, codexEnvironment,
-    ));
+  claude: {
+    query: async () => {
+      // Claude has no executable; Claude Desktop without its usage history counts as not installed.
+      if (!fs.existsSync(path.join(claudeDirectory, 'plan-usage-history.json'))) {
+        throw new CollectorError('read', `${claudeHistory} not found`, { missingPath: claudeHistory });
+      }
+      let value;
+      try { value = claudeSnapshot(claudeDirectory); }
+      catch (error) { throw new CollectorError('read', error.message); }
+      if (value.rejected_entries.length) {
+        log(`Claude read: skipped ${value.rejected_entries.length} cache entries (${[...new Set(value.rejected_entries.map(entry => entry.reason))].join(', ')})`);
+      }
+      return value;
+    },
+    parse: normalizeClaude,
   },
-  grok: async () => normalizeGrok(await rpc(
-    '/opt/homebrew/bin/grok', ['agent', '--no-leader', 'stdio'],
-    { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'quota', version: '0.1.0' } },
-    '_x.ai/billing', { action: 'get' },
-  )),
-  antigravity: async () => normalizeAntigravity(await command('/opt/homebrew/bin/agy', [
-    `--gemini_dir=${path.join(home, 'Library/Application Support/AntigravityCLI')}`, '-p', '/usage',
-  ])),
-  kiro: async () => normalizeKiro(await command('/opt/homebrew/bin/container', [
-    'exec', '-i', '--user', 'kiro', '--workdir', '/home/kiro/workspace',
-    'kiro-docs', '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
-  ])),
+  openai: {
+    query: () => {
+      const canonicalHome = path.join(home, '.local/share/codex');
+      const env = !process.env.CODEX_HOME && fs.existsSync(canonicalHome) ? { CODEX_HOME: canonicalHome } : {};
+      return rpc(
+        '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', ['app-server'],
+        { clientInfo: { name: 'quota', version: '0.1.0' }, capabilities: { experimentalApi: true } },
+        'account/rateLimits/read', {}, { env },
+      );
+    },
+    parse: normalizeOpenAI,
+  },
+  grok: {
+    query: () => rpc(
+      '/opt/homebrew/bin/grok', ['agent', '--no-leader', 'stdio'],
+      { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'quota', version: '0.1.0' } },
+      '_x.ai/billing', { action: 'get' },
+    ),
+    parse: normalizeGrok,
+  },
+  antigravity: {
+    query: () => command('/opt/homebrew/bin/agy', [
+      `--gemini_dir=${path.join(home, 'Library/Application Support/AntigravityCLI')}`, '-p', '/usage',
+    ]),
+    parse: normalizeAntigravity,
+  },
+  kiro: {
+    query: () => command('/opt/homebrew/bin/container', [
+      'exec', '-i', '--user', 'kiro', '--workdir', '/home/kiro/workspace',
+      'kiro-docs', '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
+    ]),
+    parse: normalizeKiro,
+  },
 };
 
-export async function collect() {
-  const groups = await Promise.all(Object.entries(collectors).map(async ([provider, fetch]) => {
-    try { return await fetch(); }
-    catch (error) {
-      return subscriptions.filter(item => item.provider === provider).map(item => ({
+// Every subscription row is reported. A failed provider reports its rows with the
+// failed stage in `error`, so one broken tool never hides the others.
+export async function collect(sources = collectors, report = log) {
+  const started = Date.now();
+  const providers = [...new Set(subscriptions.map(item => item.provider))];
+  const groups = await Promise.all(providers.map(async provider => {
+    const rows = subscriptions.filter(item => item.provider === provider);
+    waiting.add(provider);
+    try {
+      const source = sources[provider];
+      if (!source) throw new CollectorError('config', 'no collector for this provider');
+      const raw = await source.query();
+      try { return source.parse(raw); }
+      catch (error) { throw new CollectorError('parse', error.message); }
+    } catch (error) {
+      const message = `${rows[0].name} ${error.stage ?? 'query'}: ${error.message}`;
+      const tail = error.stderr?.trim().split(/\r?\n/).slice(-5).join('\n  ');
+      report(tail ? `${message}\n  ${tail}` : message);
+      return rows.map(item => ({
         ...item, usedPercent: null, resetsAt: null, observedAt: null,
-        status: 'unavailable', error: error.message,
+        status: error.missingPath ? 'missing' : 'unavailable', error: message, missingPath: error.missingPath,
       }));
-    }
+    } finally { waiting.delete(provider); }
   }));
   const order = new Map(subscriptions.map((item, index) => [item.id, index]));
-  return { fetchedAt: Date.now() / 1000, quotas: groups.flat().sort((a, b) => order.get(a.id) - order.get(b.id)) };
+  const quotas = groups.flat().sort((a, b) => order.get(a.id) - order.get(b.id));
+  report(`${quotas.filter(item => item.status === 'ready').length}/${quotas.length} rows ready in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+  return { fetchedAt: Date.now() / 1000, quotas };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
+    log(`stopped by ${signal} while waiting for ${[...waiting].join(', ') || 'nothing'}`);
     for (const child of children) stop(child);
     process.exit(0);
   });

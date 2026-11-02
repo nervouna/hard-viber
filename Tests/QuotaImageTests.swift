@@ -33,6 +33,20 @@ struct QuotaImageTests {
         let png = bitmap.representation(using: .png, properties: [:])!
         precondition(Array(png.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10])
 
+        // Tools that are not installed are left out, and the grid shrinks to fit.
+        var installed = quotas
+        installed[3].status = "missing"
+        installed[4].status = "missing"
+        precondition(QuotaImageExporter.orderedQuotas(installed, at: now).map(\.id) == ["claude", "openai", "antigravity-gemini", "grok"])
+        let fourCells = QuotaImageExporter.render(installed, at: now)!
+        precondition(fourCells.pixelsWide == 1600 && fourCells.pixelsHigh == 1024, "Four cells keep two rows")
+        installed[2].status = "missing"
+        installed[5].status = "missing"
+        let twoCells = QuotaImageExporter.render(installed, at: now)!
+        precondition(twoCells.pixelsWide == 1600 && twoCells.pixelsHigh == 700, "Two cells need one row")
+        precondition(QuotaImageExporter.render(quotas.map { var quota = $0; quota.status = "missing"; return quota }, at: now) == nil,
+                     "Nothing to export when no tool is installed")
+
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
         precondition(QuotaImageExporter.copy(quotas, at: now, to: pasteboard))
@@ -53,7 +67,9 @@ struct QuotaImageTests {
             unavailable[4].usedPercent = 99.96
             let fallback = QuotaImageExporter.render(unavailable, at: now)!
             try fallback.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent("quota-image-edge-cases.png"))
+            try fourCells.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent("quota-image-four-cells.png"))
+            try twoCells.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent("quota-image-two-cells.png"))
         }
-        print("Quota image tests passed: stable exhausted ordering, 2x PNG rendering, native clipboard formats, failed-copy preservation.")
+        print("Quota image tests passed: stable exhausted ordering, hidden tools, smaller grids, 2x PNG rendering, native clipboard formats, failed-copy preservation.")
     }
 }
