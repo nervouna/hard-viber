@@ -172,7 +172,15 @@ struct QuotaTests {
         guard case .success(let decoded) = UsageReport.decode(Data(report.utf8), terminationStatus: 0, timedOut: false) else {
             preconditionFailure("A valid report must decode")
         }
-        precondition(decoded.quotas.first?.status == "missing")
+        precondition(decoded.quotas.first?.status == "missing" && decoded.providers == nil, "Reports without a scope cover every provider")
+        let scoped = #"{"fetchedAt":1,"providers":["grok"],"warnings":["Collector config: x"],"quotas":[{"id":"grok","provider":"grok","name":"Grok","cycle":"weekly","status":"missing","checkedPaths":["/a/grok","/b/grok"]}]}"#
+        guard case .success(let partial) = UsageReport.decode(Data(scoped.utf8), terminationStatus: 0, timedOut: false) else {
+            preconditionFailure("A scoped report must decode")
+        }
+        precondition(partial.providers == ["grok"] && partial.warnings == ["Collector config: x"])
+        let merged = partial.merged(into: Quota.placeholders, at: now)
+        precondition(merged.first { $0.id == "grok" }!.checkedPaths == ["/a/grok", "/b/grok"])
+        precondition(merged.filter { $0.provider != "grok" }.allSatisfy { $0.error == nil }, "A decoded scope keeps other rows untouched")
         // A collector the app stopped exits 0 with no output; that is a timeout, not a parse error.
         for (data, status, timedOut, expected) in [(Data(), Int32(0), true, "Collector timeout:"), (Data(report.utf8), 1, false, "Collector exit:"),
                                                    (Data("{}".utf8), 0, false, "Collector parse:")] {
