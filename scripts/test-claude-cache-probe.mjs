@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { parseEntry, snapshot } from './claude-cache-probe.mjs';
-import { normalizeClaude } from './collect-usage.mjs';
+import { normalizeClaude, readClaude } from './collect-usage.mjs';
 
 const organization = '0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0';
 const usageKey = `1/0/_dk_https://claude.ai https://claude.ai https://claude.ai/api/organizations/${organization}/usage`;
@@ -87,7 +87,27 @@ try {
   assert.deepEqual(value.rejected_entries, [{ filename: 'fedcba9876543210_0', reason: 'invalid_or_changing_entry' }]);
   const [claude] = normalizeClaude(value);
   assert.deepEqual([claude.plan, claude.usedPercent, claude.resetsAt], ['Ultra', 42, '2026-11-04T05:00:00Z']);
+  assert.deepEqual(value.usage_files.sort(), ['0123456789abcdef_0', 'fedcba9876543210_0'], 'Unreadable usage entries are remembered too');
+  assert.equal(snapshot(directory, { files: ['fedcba9876543210_0'] }).valid_usage_cache_entries, 0, 'Only the given files are read');
+
+  // readClaude remembers the usage files and reads them alone until one goes away or the
+  // remembered responses and the last full scan are older than the freshness window.
+  const state = path.join(directory, 'state/claude-usage-files.json');
+  const responseTime = Date.parse('2026-11-02T04:00:00Z');
+  const newer = entry({ key: `1/0/https://claude.ai/api/organizations/${organization}/usage?skip_spend=1`, date: 'Mon, 02 Nov 2026 04:10:00 GMT' });
+  assert.equal(readClaude(directory, state, responseTime).valid_usage_cache_entries, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(state, 'utf8')).files.sort(), ['0123456789abcdef_0', 'fedcba9876543210_0']);
+  fs.writeFileSync(path.join(cache, '00000000000000aa_0'), newer);
+  assert.equal(readClaude(directory, state, responseTime + 60_000).valid_usage_cache_entries, 1, 'A recent remembered response skips the full scan');
+  assert.equal(readClaude(directory, state, responseTime + 1801_000).valid_usage_cache_entries, 2, 'Old responses and an old scan trigger a full scan');
+  assert.equal(JSON.parse(fs.readFileSync(state, 'utf8')).scannedAt, responseTime + 1801_000);
+  fs.rmSync(path.join(cache, '0123456789abcdef_0'));
+  fs.writeFileSync(path.join(cache, '00000000000000bb_0'), entry({ key: `1/0/https://claude.ai/api/organizations/${organization}/usage?v=2` }));
+  assert.equal(readClaude(directory, state, responseTime + 1802_000).valid_usage_cache_entries, 2, 'A remembered file that is gone triggers a full scan');
+  assert.deepEqual(JSON.parse(fs.readFileSync(state, 'utf8')).files.sort(), ['00000000000000aa_0', '00000000000000bb_0', 'fedcba9876543210_0']);
+  fs.writeFileSync(state, 'not json');
+  assert.equal(readClaude(directory, state, responseTime).valid_usage_cache_entries, 2, 'A broken state file means a full scan');
 } finally {
   fs.rmSync(directory, { recursive: true, force: true });
 }
-console.log('Claude cache probe passed: valid entries, gzip/br/zstd bodies, bad magic, CRC and key hash mismatches, non-200, non-JSON, snapshot.');
+console.log('Claude cache probe passed: valid entries, gzip/br/zstd bodies, bad magic, CRC and key hash mismatches, non-200, non-JSON, snapshot, remembered files.');

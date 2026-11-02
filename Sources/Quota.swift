@@ -12,6 +12,8 @@ struct Subscription: Decodable {
     /// A shorter form of `plan` for the shareable image.
     var shortPlan: String?
     var bucket: String?
+    /// The provider reads local files instead of starting a tool, so it is polled more often.
+    var local: Bool?
 
     static let all: [Subscription] = {
         #if TESTING
@@ -22,6 +24,11 @@ struct Subscription: Decodable {
         #endif
         return (try? JSONDecoder().decode([Subscription].self, from: Data(contentsOf: url))) ?? []
     }()
+
+    /// Providers in list order.
+    static var providers: [String] { all.map(\.provider).reduce(into: []) { if !$0.contains($1) { $0.append($1) } } }
+
+    static func isLocal(_ provider: String) -> Bool { all.contains { $0.provider == provider && $0.local == true } }
 }
 
 struct Quota: Codable, Identifiable {
@@ -39,9 +46,11 @@ struct Quota: Codable, Identifiable {
     var error: String?
     /// The executable or file that was checked when `status` is "missing".
     var missingPath: String?
+    /// Every path that was checked when `status` is "missing".
+    var checkedPaths: [String]?
 
-    /// Rows of a tool that is not installed are hidden.
-    var isInstalled: Bool { status != "missing" }
+    /// Rows of a tool that is not installed, or that is turned off in config.json, are hidden.
+    var isInstalled: Bool { status != "missing" && status != "disabled" }
 
     var subtitle: String {
         let label = plan?.isEmpty == false ? plan! : "—"
@@ -94,17 +103,20 @@ struct Quota: Codable, Identifiable {
         return String(format: "%.0f%%", value)
     }
 
-    func group(at date: Date) -> Int {
+    /// 0 current, 1 exhausted, 2 stale or failed. A value older than its freshness window is stale
+    /// (the collector's Claude read uses the same 1800 s), except while `refreshing`: a refresh that
+    /// may confirm it is under way, so it keeps its place instead of turning grey for a few seconds.
+    func group(at date: Date, refreshing: Bool = false) -> Int {
         guard status == "ready", let value = usedPercent, value.isFinite, value >= 0,
               let observedAt, let resetDate, resetDate > date,
-              date.timeIntervalSince1970 - observedAt <= (provider == "claude" ? 1800 : 900)
+              refreshing || date.timeIntervalSince1970 - observedAt <= (provider == "claude" ? 1800 : 900)
         else { return 2 }
         return value >= 100 ? 1 : 0
     }
 
-    func accessibilityText(at date: Date) -> String {
+    func accessibilityText(at date: Date, refreshing: Bool = false) -> String {
         let reason = error.map { "，错误：\($0)" } ?? ""
-        let freshness = group(at: date) == 2 ? "，数据暂时无法确认" : ""
+        let freshness = refreshing ? "，正在刷新" : group(at: date) == 2 ? "，数据暂时无法确认" : ""
         let window = cycle == "monthly" ? "月度" : "每周"
         return "\(name)，\(subtitle)，\(window)剩余 \(percentageText)，重置倒计时 \(resetText(at: date))\(freshness)\(reason)"
     }
@@ -131,15 +143,17 @@ extension Quota {
         value.status = status
         value.error = error
         value.missingPath = missingPath
+        value.checkedPaths = checkedPaths
         return value
     }
 
     /// Records a failed query. A good value stays ready until the freshness window in
     /// `group(at:)` expires, so one failed cycle does not grey out the row.
-    func failed(_ status: String, error: String, missingPath: String? = nil, at date: Date) -> Quota {
+    func failed(_ status: String, error: String, missingPath: String? = nil, checkedPaths: [String]? = nil, at date: Date) -> Quota {
         var value = self
         value.error = error
         value.missingPath = missingPath
+        value.checkedPaths = checkedPaths
         if group(at: date) == 2 { value.status = status }
         return value
     }
@@ -155,19 +169,45 @@ extension Quota {
         }
     }
 
-    /// Distinct errors across rows, for the diagnostics menu. Hidden rows name the path that
+    /// Distinct problems across rows, for the diagnostics menu. A hidden row lists every path that
     /// was checked, because a tool installed somewhere else would otherwise vanish silently.
-    static func problems(in quotas: [Quota]) -> [String] {
-        let lines = (quotas.isEmpty ? ["subscriptions.json is missing or invalid"] : []) + quotas.compactMap { quota in
-            quota.isInstalled ? quota.error : "未检测到：\(quota.name)" + (quota.missingPath.map { "（\($0)）" } ?? "")
-        }
+    static func problems(in quotas: [Quota], warnings: [String] = []) -> [Problem] {
+        let lines = (quotas.isEmpty ? [Problem("subscriptions.json is missing or invalid")] : []) + warnings.map { Problem($0) }
+            + quotas.compactMap { quota -> Problem? in
+                switch quota.status {
+                case "missing": Problem("未检测到：\(quota.name)", paths: quota.checkedPaths ?? quota.missingPath.map { [$0] } ?? [])
+                case "disabled": Problem("已停用：\(quota.name)")
+                default: quota.error.map { Problem($0) }
+                }
+            }
         return lines.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+    }
+
+    /// Whether copying should wait: a row would show as stale in the image, and a refresh that may
+    /// confirm it is under way.
+    static func awaitsConfirmation(_ quotas: [Quota], refreshing: Set<String>, at date: Date) -> Bool {
+        quotas.contains { $0.isInstalled && refreshing.contains($0.provider) && $0.group(at: date) == 2 }
+    }
+}
+
+/// One line under 诊断, with the paths checked for a tool that is not installed.
+struct Problem: Equatable {
+    let text: String
+    var paths: [String] = []
+
+    init(_ text: String, paths: [String] = []) {
+        self.text = text
+        self.paths = paths
     }
 }
 
 struct UsageReport: Decodable {
     let fetchedAt: Double
     let quotas: [Quota]
+    /// The providers the run covered; nil means all.
+    var providers: [String]? = nil
+    /// Collector-wide problems, such as a broken config.json.
+    var warnings: [String]? = nil
 
     static let timeout: TimeInterval = 35
 
@@ -185,15 +225,17 @@ struct UsageReport: Decodable {
     }
 
     /// Merges per row: a failed or missing row keeps its last good value and records the error.
+    /// Rows of providers the run did not cover stay as they are; a disabled row is hidden at once.
     func merged(into current: [Quota], subscriptions: [Subscription] = Subscription.all, at date: Date) -> [Quota] {
         subscriptions.map { subscription in
             let previous = current.first { $0.id == subscription.id } ?? Quota(subscription)
+            if let providers, !providers.contains(subscription.provider) { return previous }
             guard let fresh = quotas.first(where: { $0.id == subscription.id }) else {
                 return previous.failed("unavailable", error: "Collector protocol: no \(subscription.id) row in the report", at: date)
             }
-            guard fresh.status != "ready" else { return fresh.described(by: subscription) }
+            guard fresh.status != "ready", fresh.status != "disabled" else { return fresh.described(by: subscription) }
             return previous.failed(fresh.status, error: fresh.error ?? "\(subscription.name) failed without a reason",
-                                   missingPath: fresh.missingPath, at: date)
+                                   missingPath: fresh.missingPath, checkedPaths: fresh.checkedPaths, at: date)
         }
     }
 }
@@ -206,12 +248,29 @@ struct CollectorFailure: Error {
 @MainActor
 final class UsageStore: ObservableObject {
     @Published var quotas = Quota.placeholders
-    private var process: Process?
-    private var timedOut = false
+    /// Providers whose refresh is under way.
+    @Published private(set) var refreshing: Set<String> = []
+    /// Collector-wide problems from the last run, such as a broken config.json.
+    @Published private(set) var warnings: [String] = []
+    private var runs: [Run] = []
+    private var lastRun: [String: Date] = [:]
+    /// Failed queries in a row, per provider.
+    private var failures: [String: Int] = [:]
     private var timer: Timer?
-    private var lastRefresh: Date?
     private let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Quota/usage.json")
+
+    /// One collector process and the providers it queries.
+    private final class Run {
+        let task: Process
+        let providers: Set<String>
+        var timedOut = false
+
+        init(task: Process, providers: Set<String>) {
+            self.task = task
+            self.providers = providers
+        }
+    }
 
     init() {
         if let data = try? Data(contentsOf: cacheURL),
@@ -220,70 +279,113 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    var problems: [String] { Quota.problems(in: quotas) }
+    var problems: [Problem] { Quota.problems(in: quotas, warnings: warnings) }
     var installedQuotas: [Quota] { quotas.filter(\.isInstalled) }
+    var awaitsConfirmation: Bool { Quota.awaitsConfirmation(quotas, refreshing: refreshing, at: Date()) }
 
     func start() {
         refresh(force: true)
-        timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        // A cheap check each minute; the policy decides what is due. The tolerance lets macOS
+        // coalesce the wake-ups.
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
         }
+        timer.tolerance = 20
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
-    func refresh(force: Bool = false) {
-        guard process == nil else { return }
-        if !force, let lastRefresh, Date().timeIntervalSince(lastRefresh) < 60 { return }
-        lastRefresh = Date()
+    /// Runs the providers whose background interval has passed.
+    private func poll() {
+        let conditions = PowerConditions.current()
+        let now = Date()
+        run(Set(Subscription.providers.filter {
+            RefreshPolicy.isDue(local: Subscription.isLocal($0), lastRun: lastRun[$0], failures: failures[$0] ?? 0, conditions: conditions, at: now)
+        }))
+    }
+
+    /// After a wake, refreshes the providers that refresh in the background under the current
+    /// power conditions.
+    func refreshAfterWake() {
+        let conditions = PowerConditions.current()
+        refresh(Set(Subscription.providers.filter { RefreshPolicy.interval(local: Subscription.isLocal($0), conditions) != nil }))
+    }
+
+    /// Refreshes the given providers (default: all) that were not refreshed in the last minute;
+    /// `force` skips that limit.
+    func refresh(_ providers: Set<String>? = nil, force: Bool = false) {
+        let now = Date()
+        run((providers ?? Set(Subscription.providers)).filter { provider in
+            force || lastRun[provider].map { now.timeIntervalSince($0) >= RefreshPolicy.throttle } ?? true
+        })
+    }
+
+    private func run(_ requested: Set<String>) {
+        let providers = requested.subtracting(refreshing)
+        guard !providers.isEmpty else { return }
+        let now = Date()
+        for provider in providers { lastRun[provider] = now }
         guard let helper = Bundle.main.url(forResource: "collect-usage", withExtension: "mjs") else {
-            fail("Collector spawn: collect-usage.mjs is missing from Quota.app")
+            fail("Collector spawn: collect-usage.mjs is missing from Quota.app", providers: providers)
             return
         }
-        let node = ["/opt/homebrew/opt/node@24/bin/node", "/usr/local/opt/node@24/bin/node"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-        guard let node else { fail("Collector spawn: Homebrew node@24 is not installed"); return }
+        let node: String
+        switch NodeLocator.locate(configured: UserConfig.load().node) {
+        case .success(let path): node = path
+        case .failure(let failure): fail(failure.message, providers: providers); return
+        }
         let task = Process()
         let output = Pipe()
         task.executableURL = URL(fileURLWithPath: node)
-        task.arguments = [helper.path]
+        task.arguments = [helper.path, "--providers", providers.sorted().joined(separator: ",")]
         task.standardInput = FileHandle.nullDevice
         task.standardOutput = output
         task.standardError = CollectorLog.handle() ?? FileHandle.nullDevice
-        timedOut = false
         do {
             try task.run()
-            process = task
         } catch {
-            fail("Collector spawn: could not start \(node): \(error.localizedDescription)")
+            fail("Collector spawn: could not start \(node): \(error.localizedDescription)", providers: providers)
             return
         }
+        runs.append(Run(task: task, providers: providers))
+        refreshing.formUnion(providers)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let data = output.fileHandleForReading.readDataToEndOfFile()
             task.waitUntilExit()
-            DispatchQueue.main.async {
-                guard let self, self.process === task else { return }
-                self.process = nil
-                switch UsageReport.decode(data, terminationStatus: task.terminationStatus, timedOut: self.timedOut) {
-                case .success(let report):
-                    self.quotas = report.merged(into: self.quotas, at: Date())
-                    for problem in Quota.problems(in: self.quotas) where problem.hasPrefix("Collector ") {
-                        CollectorLog.append(problem)
-                    }
-                    self.save()
-                case .failure(let failure):
-                    self.fail(failure.message)
-                }
-            }
+            DispatchQueue.main.async { self?.finish(task, data: data) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + UsageReport.timeout) { [weak self, weak task] in
-            guard let task, self?.process === task, task.isRunning else { return }
-            self?.timedOut = true
+            guard let task, task.isRunning, let run = self?.runs.first(where: { $0.task === task }) else { return }
+            run.timedOut = true
             task.terminate()
         }
     }
 
-    private func fail(_ message: String) {
+    private func finish(_ task: Process, data: Data) {
+        guard let index = runs.firstIndex(where: { $0.task === task }) else { return }
+        let run = runs.remove(at: index)
+        refreshing.subtract(run.providers)
+        switch UsageReport.decode(data, terminationStatus: task.terminationStatus, timedOut: run.timedOut) {
+        case .success(let report):
+            quotas = report.merged(into: quotas, at: Date())
+            warnings = report.warnings ?? []
+            for provider in run.providers {
+                let rows = report.quotas.filter { $0.provider == provider }
+                failures[provider] = rows.isEmpty || rows.contains { $0.status == "unavailable" } ? (failures[provider] ?? 0) + 1 : 0
+            }
+            for problem in Quota.problems(in: quotas.filter { run.providers.contains($0.provider) }) where problem.text.hasPrefix("Collector ") {
+                CollectorLog.append(problem.text)
+            }
+            save()
+        case .failure(let failure):
+            fail(failure.message, providers: run.providers)
+        }
+    }
+
+    private func fail(_ message: String, providers: Set<String>) {
         CollectorLog.append(message)
-        quotas = quotas.map { $0.failed("unavailable", error: message, at: Date()) }
+        quotas = quotas.map { providers.contains($0.provider) ? $0.failed("unavailable", error: message, at: Date()) : $0 }
+        for provider in providers { failures[provider, default: 0] += 1 }
     }
 
     private func save() {
@@ -298,7 +400,7 @@ final class UsageStore: ObservableObject {
 
     func stop() {
         timer?.invalidate()
-        if let process, process.isRunning { process.terminate() }
+        for run in runs where run.task.isRunning { run.task.terminate() }
     }
 }
 
@@ -315,6 +417,7 @@ struct QuotaRing: View {
     var size: CGFloat = 18
     var lineWidth: CGFloat = 2.5
     var hidesUnconfirmed = false
+    var refreshing = false
 
     var body: some View {
         let color = quotaColor(for: group, remaining: quota.remainingPercent)
@@ -333,6 +436,7 @@ struct QuotaRing: View {
             }
         }
         .frame(width: size, height: size)
+        .phaseAnimator(refreshing ? [1, 0.3] : [1]) { ring, opacity in ring.opacity(opacity) } animation: { _ in .easeInOut(duration: 0.7) }
         .accessibilityHidden(true)
     }
 }
@@ -340,15 +444,18 @@ struct QuotaRing: View {
 struct QuotaRow: View {
     let quota: Quota
     let now: Date
+    var refreshing = false
 
     var body: some View {
-        let group = quota.group(at: now)
+        let group = quota.group(at: now, refreshing: refreshing)
+        // A value past its freshness window stays in place while its refresh runs, but in grey.
+        let confirmed = group != 2 && quota.group(at: now) == group
         HStack(spacing: 8) {
-            QuotaRing(quota: quota, group: group)
+            QuotaRing(quota: quota, group: confirmed ? group : 2, refreshing: refreshing)
             VStack(alignment: .leading, spacing: 1) {
                 Text(quota.name)
                     .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(group == 0 ? .primary : .secondary)
+                    .foregroundStyle(group == 0 && confirmed ? .primary : .secondary)
                 Text(quota.subtitle)
                     .font(.system(size: 10.5, weight: .regular))
                     .foregroundStyle(.secondary)
@@ -359,7 +466,7 @@ struct QuotaRow: View {
                 Text(quota.percentageText)
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(group == 0 ? .primary : .secondary)
+                    .foregroundStyle(group == 0 && confirmed ? .primary : .secondary)
                     .minimumScaleFactor(0.85)
                 Text(quota.resetText(at: now))
                     .font(.system(size: 10.5, weight: .regular))
@@ -374,7 +481,7 @@ struct QuotaRow: View {
         .contentShape(Rectangle())
         .help(quota.error ?? "")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(quota.accessibilityText(at: now))
+        .accessibilityLabel(quota.accessibilityText(at: now, refreshing: refreshing))
     }
 }
 
@@ -385,13 +492,18 @@ struct QuotaPanel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
             let quotas = store.installedQuotas
-            let groups = (0...2).map { group in quotas.filter { $0.group(at: timeline.date) == group } }.filter { !$0.isEmpty }
+            let refreshing = store.refreshing
+            let groups = (0...2).map { group in
+                quotas.filter { $0.group(at: timeline.date, refreshing: refreshing.contains($0.provider)) == group }
+            }.filter { !$0.isEmpty }
             VStack(spacing: 0) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, quotas in
                     if index > 0 {
                         Divider().padding(.horizontal, 12).padding(.vertical, 4)
                     }
-                    ForEach(quotas) { quota in QuotaRow(quota: quota, now: timeline.date) }
+                    ForEach(quotas) { quota in
+                        QuotaRow(quota: quota, now: timeline.date, refreshing: refreshing.contains(quota.provider))
+                    }
                 }
                 if quotas.isEmpty {
                     Text("未检测到已安装的服务")
@@ -414,8 +526,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let store = UsageStore()
     private var item: NSStatusItem!
     private let popover = NSPopover()
-    private var observation: AnyCancellable?
+    private var observations: [AnyCancellable] = []
     private var wakeObserver: NSObjectProtocol?
+    /// When a copy waiting for a refresh gives up and copies what it has.
+    private var copyDeadline: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -451,11 +565,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applicationItem.submenu = commands
         NSApplication.shared.mainMenu = applicationMenu
         resize()
-        observation = store.$quotas.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.resize() }
+        // The publishers fire before the value changes, so read the store on the next turn.
+        observations = [store.$quotas.map { _ in () }.eraseToAnyPublisher(), store.$refreshing.map { _ in () }.eraseToAnyPublisher()].map {
+            $0.sink { [weak self] in
+                DispatchQueue.main.async {
+                    self?.resize()
+                    self?.copyWhenConfirmed()
+                }
+            }
         }
+        // The network is often not back the moment the Mac wakes.
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.store.refresh() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self?.store.refreshAfterWake() }
         }
         store.start()
         if CommandLine.arguments.contains("--show") {
@@ -465,7 +586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func resize() {
         let quotas = store.installedQuotas
-        let groups = Set(quotas.map { $0.group(at: Date()) }).count
+        let groups = Set(quotas.map { $0.group(at: Date(), refreshing: store.refreshing.contains($0.provider)) }).count
         // An empty list shows one row-high message.
         popover.contentSize = NSSize(width: 336, height: 10 + max(1, quotas.count) * 36 + max(0, groups - 1) * 9)
     }
@@ -509,19 +630,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         let problems = store.problems
         // Items without an action render disabled, which suits read-only error lines.
-        for problem in problems.isEmpty ? ["没有错误"] : problems {
-            let line = menu.addItem(withTitle: problem.count > 90 ? problem.prefix(89) + "…" : problem, action: nil, keyEquivalent: "")
-            line.toolTip = problem
+        for problem in problems.isEmpty ? [Problem("没有错误")] : problems {
+            let text = problem.text
+            let line = menu.addItem(withTitle: text.count > 90 ? text.prefix(89) + "…" : text, action: nil, keyEquivalent: "")
+            line.toolTip = text
+            if !problem.paths.isEmpty {
+                line.submenu = NSMenu()
+                for path in problem.paths { line.submenu?.addItem(withTitle: path, action: nil, keyEquivalent: "") }
+            }
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "打开日志", action: #selector(openLog), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "打开配置文件", action: #selector(openConfig), keyEquivalent: "").target = self
     }
 
     @objc private func openLog() {
         if !NSWorkspace.shared.open(CollectorLog.url) { NSSound.beep() }
     }
 
+    /// Creates an empty config.json first, which changes nothing, so there is a file to edit.
+    @objc private func openConfig() {
+        let url = UserConfig.url
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? Data("{\n  \"providers\": {}\n}\n".utf8).write(to: url, options: .withoutOverwriting)
+        }
+        if !NSWorkspace.shared.open(url) { NSSound.beep() }
+    }
+
+    /// Copies the image once no row that would show as stale is still being refreshed, waiting
+    /// at most 10 s; values younger than a minute are copied at once.
     @objc private func copyUsageImage() {
+        store.refresh()
+        let deadline = Date().addingTimeInterval(10)
+        copyDeadline = deadline
+        copyWhenConfirmed()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.copyWhenConfirmed() }
+    }
+
+    private func copyWhenConfirmed() {
+        guard let copyDeadline, !store.awaitsConfirmation || Date() >= copyDeadline else { return }
+        self.copyDeadline = nil
         if QuotaImageExporter.copy(store.quotas, at: Date()) {
             popover.performClose(nil)
         } else {

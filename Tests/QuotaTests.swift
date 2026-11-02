@@ -52,12 +52,16 @@ struct QuotaTests {
         subscriptionTests()
         mergeTests(now: now)
         diagnosticsTests(now: now)
+        refreshTests(now: now)
+        configTests()
     }
 
     static func subscriptionTests() {
         let ids = Subscription.all.map(\.id)
         precondition(!ids.isEmpty && Set(ids).count == ids.count, "subscriptions.json must load with unique ids")
         precondition(Quota.placeholders.map(\.id) == ids, "Rows must follow the subscription list order")
+        precondition(Subscription.providers == ["claude", "openai", "antigravity", "kiro", "grok"], "Providers are listed once, in order")
+        precondition(Subscription.isLocal("claude") && !Subscription.isLocal("grok"), "Only Claude reads local files")
         let antigravity = Quota.placeholders.first { $0.id == "antigravity-gemini" }!
         precondition(antigravity.plan == "Google AI Pro" && antigravity.shortPlan == "AI Pro" && antigravity.bucket == "Gemini")
 
@@ -137,7 +141,30 @@ struct QuotaTests {
         let timedOut = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [failure("grok", "unavailable", "Grok timeout: no reply")])
             .merged(into: [grok], at: now).first { $0.id == "grok" }!
         precondition(timedOut.isInstalled && timedOut.missingPath == nil, "Only a clear not-installed signal hides a row")
-        print("Merge tests passed: per-row merge, missing ids, no flapping, freshness-driven staleness, not-installed state, recovery.")
+
+        // A run that covers some providers leaves the other rows alone.
+        let start = [ready("claude", used: 30, at: now), ready("grok", used: 10, at: now)]
+        let claudeOnly = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [ready("claude", used: 35, at: soon)], providers: ["claude"])
+            .merged(into: start, at: soon)
+        precondition(claudeOnly.first { $0.id == "claude" }!.usedPercent == 35)
+        let untouched = claudeOnly.first { $0.id == "grok" }!
+        precondition(untouched.usedPercent == 10 && untouched.error == nil && untouched.observedAt == now.timeIntervalSince1970,
+                     "Rows outside the run must not be marked failed")
+        precondition(claudeOnly.first { $0.id == "openai" }!.error == nil, "Uncovered rows absent from the report are not an error")
+
+        // A provider turned off in config.json is hidden at once, even with a fresh value.
+        let disabled = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [failure("grok", "disabled", "")].map { var quota = $0; quota.error = nil; return quota },
+                                   providers: ["grok"]).merged(into: start, at: soon).first { $0.id == "grok" }!
+        precondition(disabled.status == "disabled" && !disabled.isInstalled && disabled.usedPercent == nil)
+
+        // With hourly background refreshes the last good value is past its window when a refresh
+        // fails, so the row turns grey; the policy retries it five minutes later.
+        let hourLater = now.addingTimeInterval(3600)
+        let failedLate = timeout.merged(into: good, at: hourLater).first { $0.id == "openai" }!
+        precondition(failedLate.status == "unavailable" && failedLate.group(at: hourLater) == 2)
+        precondition(!RefreshPolicy.isDue(local: false, lastRun: hourLater, failures: 1, conditions: PowerConditions(), at: hourLater.addingTimeInterval(299))
+                     && RefreshPolicy.isDue(local: false, lastRun: hourLater, failures: 1, conditions: PowerConditions(), at: hourLater.addingTimeInterval(300)))
+        print("Merge tests passed: per-row merge, missing ids, no flapping, freshness-driven staleness, not-installed state, recovery, partial runs, disabled rows.")
     }
 
     static func diagnosticsTests(now: Date) {
@@ -156,16 +183,24 @@ struct QuotaTests {
         }
 
         var quotas = Quota.placeholders
-        precondition(Quota.problems(in: quotas).isEmpty && Quota.problems(in: []) == ["subscriptions.json is missing or invalid"])
+        precondition(Quota.problems(in: quotas).isEmpty && Quota.problems(in: []) == [Problem("subscriptions.json is missing or invalid")])
         for index in [2, 3] {
             quotas[index].status = "missing"
-            quotas[index].error = "Antigravity spawn: /opt/homebrew/bin/agy is not installed"
+            quotas[index].error = "Antigravity spawn: agy is not installed (checked 2 paths)"
             quotas[index].missingPath = "/opt/homebrew/bin/agy"
+            quotas[index].checkedPaths = ["/opt/homebrew/bin/agy", "~/.local/bin/agy"]
         }
         quotas[4].status = "missing"
+        quotas[4].missingPath = "/opt/homebrew/bin/container"
+        quotas[1].status = "disabled"
         quotas[5].error = "Grok timeout: no reply"
-        precondition(Quota.problems(in: quotas) == ["未检测到：Antigravity（/opt/homebrew/bin/agy）", "未检测到：Kiro", "Grok timeout: no reply"],
-                     "Hidden rows name the checked path, and shared lines are listed once")
+        precondition(Quota.problems(in: quotas, warnings: ["Collector config: unknown provider gork"]) == [
+            Problem("Collector config: unknown provider gork"),
+            Problem("已停用：OpenAI"),
+            Problem("未检测到：Antigravity", paths: ["/opt/homebrew/bin/agy", "~/.local/bin/agy"]),
+            Problem("未检测到：Kiro", paths: ["/opt/homebrew/bin/container"]),
+            Problem("Grok timeout: no reply"),
+        ], "Hidden rows list every checked path, caches from before keep their one path, and shared lines are listed once")
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("quota-log-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -180,5 +215,84 @@ struct QuotaTests {
                      "A full log must rotate to collector.log.1")
         precondition((try? FileManager.default.attributesOfItem(atPath: log.path))?[.posixPermissions] as? Int == 0o600)
         print("Diagnostics tests passed: run classification, problem list, bounded log rotation.")
+    }
+
+    static func refreshTests(now: Date) {
+        // Background intervals: local reads more often than tools; both back off, tools stop.
+        let ac = PowerConditions(), battery = PowerConditions(onBattery: true)
+        let lowPower = PowerConditions(lowPower: true), hot = PowerConditions(onBattery: true, thermalPressure: true)
+        precondition(RefreshPolicy.interval(local: true, ac) == 600 && RefreshPolicy.interval(local: false, ac) == 3600)
+        precondition(RefreshPolicy.interval(local: true, battery) == 1200 && RefreshPolicy.interval(local: false, battery) == 10_800)
+        for conditions in [lowPower, hot] {
+            precondition(RefreshPolicy.interval(local: true, conditions) == 3600 && RefreshPolicy.interval(local: false, conditions) == nil)
+        }
+        func due(_ local: Bool, after seconds: TimeInterval, failures: Int = 0, _ conditions: PowerConditions = PowerConditions()) -> Bool {
+            RefreshPolicy.isDue(local: local, lastRun: now, failures: failures, conditions: conditions, at: now.addingTimeInterval(seconds))
+        }
+        precondition(RefreshPolicy.isDue(local: false, lastRun: nil, failures: 0, conditions: ac, at: now), "A provider never refreshed is due")
+        precondition(!RefreshPolicy.isDue(local: false, lastRun: nil, failures: 0, conditions: lowPower, at: now), "Tools wait for the panel in Low Power Mode")
+        precondition(!due(true, after: 599) && due(true, after: 600) && !due(false, after: 3599) && due(false, after: 3600))
+        precondition(!due(false, after: 899, failures: 2) && due(false, after: 900, failures: 2), "The second retry waits 15 minutes")
+        precondition(!due(false, after: 3599, failures: 3) && due(false, after: 3600, failures: 3), "After two retries the usual interval applies")
+        precondition(!due(true, after: 299, failures: 1) && due(true, after: 300, failures: 1))
+        precondition(!due(false, after: 3 * 3600, failures: 1, lowPower), "Retries never run where there is no background refresh")
+
+        // A value past its window stays in place, unconfirmed, while a refresh may confirm it.
+        var quota = Quota.placeholders.first { $0.id == "grok" }!
+        quota.usedPercent = 40
+        quota.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(86_400))
+        quota.observedAt = now.addingTimeInterval(-3600).timeIntervalSince1970
+        quota.status = "ready"
+        precondition(quota.group(at: now) == 2 && quota.group(at: now, refreshing: true) == 0)
+        precondition(quota.accessibilityText(at: now, refreshing: true).contains("正在刷新") && quota.accessibilityText(at: now).contains("无法确认"))
+        var failed = quota
+        failed.status = "unavailable"
+        precondition(failed.group(at: now, refreshing: true) == 2, "A failed row stays grey while it retries")
+        var expired = quota
+        expired.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))
+        precondition(expired.group(at: now, refreshing: true) == 2, "A passed reset is not current while refreshing")
+
+        // Copying waits only for a refresh that may confirm a row the image would show as stale.
+        var fresh = quota
+        fresh.observedAt = now.timeIntervalSince1970
+        precondition(Quota.awaitsConfirmation([quota], refreshing: ["grok"], at: now))
+        precondition(!Quota.awaitsConfirmation([quota], refreshing: [], at: now), "Nothing to wait for")
+        precondition(!Quota.awaitsConfirmation([fresh], refreshing: ["grok"], at: now), "A current value is copied at once")
+        var hidden = quota
+        hidden.status = "missing"
+        precondition(!Quota.awaitsConfirmation([hidden], refreshing: ["grok"], at: now), "Hidden rows are not in the image")
+        print("Refresh tests passed: power-aware intervals, retries, refreshing rows, copy confirmation.")
+    }
+
+    static func configTests() {
+        let home = "/Users/me"
+        let defaults = NodeLocator.candidates(configured: nil, path: "/usr/bin:/bin:relative:/opt/homebrew/bin", home: home)
+        precondition(defaults == ["/opt/homebrew/opt/node@24/bin/node", "/usr/local/opt/node@24/bin/node", "/opt/homebrew/bin/node",
+                                  "/usr/local/bin/node", "/Users/me/.local/bin/node", "/usr/bin/node", "/bin/node"],
+                     "node@24 first, then the usual directories, then PATH, each once")
+        precondition(NodeLocator.candidates(configured: "~/n/node", path: "/usr/bin", home: home) == ["/Users/me/n/node"], "A configured Node is the only candidate")
+        precondition(NodeLocator.candidates(configured: "", path: nil, home: home) == Array(defaults.prefix(5)), "An empty setting means the default")
+        guard case .success(let node) = NodeLocator.locate(configured: nil, path: nil, home: home, isExecutable: { $0 == "/usr/local/bin/node" }) else {
+            preconditionFailure("An installed Node must be found")
+        }
+        precondition(node == "/usr/local/bin/node")
+        guard case .failure(let missing) = NodeLocator.locate(configured: nil, path: "/usr/bin", home: home, isExecutable: { _ in false }),
+              case .failure(let configured) = NodeLocator.locate(configured: "/x/node", path: nil, home: home, isExecutable: { _ in false }) else {
+            preconditionFailure("A missing Node must fail")
+        }
+        precondition(missing.message.hasPrefix("Collector spawn: Node.js is not installed (checked /opt/homebrew/opt/node@24/bin/node, ")
+                     && missing.message.hasSuffix("~/.local/bin/node, /usr/bin/node)"), "The error lists every path checked")
+        precondition(configured.message == "Collector spawn: /x/node is not installed (set in config.json)")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("quota-config-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("config.json")
+        precondition(UserConfig.load(from: file).node == nil, "A missing file means defaults")
+        try? Data(#"{"node": "~/node", "providers": {"grok": {"enabled": false}}}"#.utf8).write(to: file)
+        precondition(UserConfig.load(from: file).node == "~/node", "Provider settings are the collector's")
+        try? Data(#"{"node": 24}"#.utf8).write(to: file)
+        precondition(UserConfig.load(from: file).node == nil, "A broken file means defaults")
+        print("Config tests passed: Node candidates and overrides, config.json loading.")
     }
 }
