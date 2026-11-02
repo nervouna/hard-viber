@@ -4,13 +4,16 @@ import SwiftUI
 
 @MainActor
 enum QuotaImageExporter {
+    /// Drops tools that are not installed and moves exhausted subscriptions last.
     static func orderedQuotas(_ quotas: [Quota], at date: Date) -> [Quota] {
-        quotas.filter { $0.group(at: date) != 1 } + quotas.filter { $0.group(at: date) == 1 }
+        let installed = quotas.filter(\.isInstalled)
+        return installed.filter { $0.group(at: date) != 1 } + installed.filter { $0.group(at: date) == 1 }
     }
 
     static func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
+        let quotas = orderedQuotas(quotas, at: date)
         guard !quotas.isEmpty, let artwork = QuotaImageArtwork.shared else { return nil }
-        let view = QuotaImageView(quotas: orderedQuotas(quotas, at: date), date: date, artwork: artwork)
+        let view = QuotaImageView(quotas: quotas, date: date, artwork: artwork)
             .environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
@@ -124,13 +127,16 @@ private struct QuotaImageView: View {
                     .overlay(alignment: .bottom) { SketchRule().frame(height: 2) }
                 }
             }
-            .overlay(alignment: .leading) {
-                HStack(spacing: columnWidth - 2) {
-                    SketchRule(vertical: true).frame(width: 2)
-                    SketchRule(vertical: true).frame(width: 2)
+            .overlay(alignment: .topLeading) {
+                // A column rule runs only through the rows that have a cell on both sides.
+                ForEach(1..<3) { column in
+                    let rows = (quotas.count - column + 2) / 3
+                    if rows > 0 {
+                        SketchRule(vertical: true)
+                            .frame(width: 2, height: CGFloat(rows) * 162 - 20)
+                            .offset(x: CGFloat(column) * columnWidth - 1, y: 10)
+                    }
                 }
-                .padding(.vertical, 10)
-                .offset(x: columnWidth - 1)
             }
 
             Text(timestamp)

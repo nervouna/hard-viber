@@ -17,7 +17,8 @@ const environment = {
   NO_COLOR: '1', TERM: 'dumb',
 };
 
-// Stages: spawn, timeout, exit, protocol, read, parse. `missing` marks a tool that is not installed.
+// Stages: spawn, timeout, exit, protocol, read, parse. `missingPath` marks a tool that is not
+// installed and names the path that was checked; the app hides such rows.
 export class CollectorError extends Error {
   constructor(stage, message, details = {}) {
     super(message);
@@ -53,9 +54,11 @@ function start(executable, args, extraEnvironment = {}) {
 }
 
 function spawnError(executable, error) {
-  return error.code === 'ENOENT'
-    ? new CollectorError('spawn', `${executable} is not installed`, { missing: true })
-    : new CollectorError('spawn', `${executable}: ${error.code ?? error.message}`);
+  // ENOENT also means a script's interpreter is missing; only a missing file means not installed.
+  if (error.code === 'ENOENT' && !fs.existsSync(executable)) {
+    return new CollectorError('spawn', `${executable} is not installed`, { missingPath: executable });
+  }
+  return new CollectorError('spawn', `${executable}: ${error.code ?? error.message}`);
 }
 
 export function command(executable, args, timeout = 25000) {
@@ -184,12 +187,15 @@ export function normalizeClaude(value) {
 }
 
 const claudeDirectory = path.join(home, 'Library/Application Support/Claude');
+const claudeHistory = '~/Library/Application Support/Claude/plan-usage-history.json';
 
 const collectors = {
   claude: {
     query: async () => {
-      // Claude has no executable; a missing Claude Desktop data directory means it is not installed.
-      if (!fs.existsSync(claudeDirectory)) throw new CollectorError('read', '~/Library/Application Support/Claude not found', { missing: true });
+      // Claude has no executable; Claude Desktop without its usage history counts as not installed.
+      if (!fs.existsSync(path.join(claudeDirectory, 'plan-usage-history.json'))) {
+        throw new CollectorError('read', `${claudeHistory} not found`, { missingPath: claudeHistory });
+      }
       let value;
       try { value = claudeSnapshot(claudeDirectory); }
       catch (error) { throw new CollectorError('read', error.message); }
@@ -255,7 +261,7 @@ export async function collect(sources = collectors, report = log) {
       report(tail ? `${message}\n  ${tail}` : message);
       return rows.map(item => ({
         ...item, usedPercent: null, resetsAt: null, observedAt: null,
-        status: error.missing ? 'missing' : 'unavailable', error: message,
+        status: error.missingPath ? 'missing' : 'unavailable', error: message, missingPath: error.missingPath,
       }));
     } finally { waiting.delete(provider); }
   }));

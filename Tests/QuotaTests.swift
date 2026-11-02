@@ -87,10 +87,11 @@ struct QuotaTests {
             quota.status = "ready"
             return quota
         }
-        func failure(_ id: String, _ status: String, _ error: String) -> Quota {
+        func failure(_ id: String, _ status: String, _ error: String, missingPath: String? = nil) -> Quota {
             var quota = Quota.placeholders.first { $0.id == id }!
             quota.status = status
             quota.error = error
+            quota.missingPath = missingPath
             return quota
         }
 
@@ -119,17 +120,23 @@ struct QuotaTests {
         let demoted = timeout.merged(into: [flapped], at: later).first { $0.id == "openai" }!
         precondition(demoted.status == "unavailable" && demoted.group(at: later) == 2)
 
-        // A tool that is not installed has its own state, and success clears errors.
-        let notInstalled = UsageReport(fetchedAt: now.timeIntervalSince1970,
-                                       quotas: [failure("grok", "missing", "Grok spawn: /opt/homebrew/bin/grok is not installed")])
+        // A tool that is not installed is hidden, and success clears errors.
+        let notInstalled = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [
+            failure("grok", "missing", "Grok spawn: /opt/homebrew/bin/grok is not installed", missingPath: "/opt/homebrew/bin/grok"),
+        ])
         let grok = notInstalled.merged(into: Quota.placeholders, at: now).first { $0.id == "grok" }!
-        precondition(grok.status == "missing" && grok.group(at: now) == 2)
-        precondition(grok.accessibilityText(at: now).contains("未安装") && grok.accessibilityText(at: now).contains("is not installed"))
+        precondition(grok.status == "missing" && !grok.isInstalled && grok.missingPath == "/opt/homebrew/bin/grok")
+        let vanished = notInstalled.merged(into: [ready("grok", used: 10, at: now)], at: soon).first { $0.id == "grok" }!
+        precondition(vanished.isInstalled && vanished.group(at: soon) == 0 && vanished.error!.hasSuffix("is not installed"),
+                     "A fresh value stays visible with the reason until it goes stale")
         let uninstalled = notInstalled.merged(into: [ready("grok", used: 10, at: now)], at: later).first { $0.id == "grok" }!
-        precondition(uninstalled.status == "missing", "A stale row whose tool disappeared must show as not installed")
+        precondition(!uninstalled.isInstalled, "A stale row whose tool disappeared must be hidden")
         let recovered = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [ready("grok", used: 10, at: now)])
             .merged(into: [grok], at: now).first { $0.id == "grok" }!
-        precondition(recovered.status == "ready" && recovered.error == nil, "A successful query must clear the error")
+        precondition(recovered.isInstalled && recovered.error == nil && recovered.missingPath == nil, "A successful query must clear the error")
+        let timedOut = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [failure("grok", "unavailable", "Grok timeout: no reply")])
+            .merged(into: [grok], at: now).first { $0.id == "grok" }!
+        precondition(timedOut.isInstalled && timedOut.missingPath == nil, "Only a clear not-installed signal hides a row")
         print("Merge tests passed: per-row merge, missing ids, no flapping, freshness-driven staleness, not-installed state, recovery.")
     }
 
@@ -150,10 +157,15 @@ struct QuotaTests {
 
         var quotas = Quota.placeholders
         precondition(Quota.problems(in: quotas).isEmpty && Quota.problems(in: []) == ["subscriptions.json is missing or invalid"])
-        quotas[2].error = "Antigravity spawn: /opt/homebrew/bin/agy is not installed"
-        quotas[3].error = quotas[2].error
+        for index in [2, 3] {
+            quotas[index].status = "missing"
+            quotas[index].error = "Antigravity spawn: /opt/homebrew/bin/agy is not installed"
+            quotas[index].missingPath = "/opt/homebrew/bin/agy"
+        }
+        quotas[4].status = "missing"
         quotas[5].error = "Grok timeout: no reply"
-        precondition(Quota.problems(in: quotas) == [quotas[2].error!, "Grok timeout: no reply"], "Shared errors are listed once")
+        precondition(Quota.problems(in: quotas) == ["未检测到：Antigravity（/opt/homebrew/bin/agy）", "未检测到：Kiro", "Grok timeout: no reply"],
+                     "Hidden rows name the checked path, and shared lines are listed once")
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("quota-log-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
