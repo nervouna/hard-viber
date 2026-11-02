@@ -3,16 +3,23 @@ import CoreImage
 import SwiftUI
 
 @MainActor
-enum QuotaImageExporter {
+struct QuotaImageExporter {
+    /// The mascot as a die-cut sticker; nothing renders without it.
+    let mascot: NSImage?
+
+    init(mascot url: URL) {
+        mascot = QuotaImageArtwork.sticker(contentsOf: url)
+    }
+
     /// Drops tools that are not installed and moves exhausted subscriptions last.
     static func orderedQuotas(_ quotas: [Quota], at date: Date) -> [Quota] {
         let installed = quotas.filter(\.isInstalled)
         return installed.filter { $0.group(at: date) != 1 } + installed.filter { $0.group(at: date) == 1 }
     }
 
-    static func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
-        let quotas = orderedQuotas(quotas, at: date)
-        guard !quotas.isEmpty, let mascot = QuotaImageArtwork.mascot else { return nil }
+    func render(_ quotas: [Quota], at date: Date) -> NSBitmapImageRep? {
+        let quotas = Self.orderedQuotas(quotas, at: date)
+        guard !quotas.isEmpty, let mascot else { return nil }
         let view = QuotaImageView(summary: QuotaImageSummary(quotas, at: date), mascot: mascot)
             .environment(\.colorScheme, .light)
         let renderer = ImageRenderer(content: view)
@@ -24,7 +31,7 @@ enum QuotaImageExporter {
         return bitmap
     }
 
-    static func copy(_ quotas: [Quota], at date: Date, to pasteboard: NSPasteboard = .general) -> Bool {
+    func copy(_ quotas: [Quota], at date: Date, to pasteboard: NSPasteboard = .general) -> Bool {
         guard let bitmap = render(quotas, at: date),
               let png = bitmap.representation(using: .png, properties: [:]),
               let tiff = bitmap.representation(using: .tiff, properties: [:]) else { return false }
@@ -127,17 +134,10 @@ struct QuotaImageSummary {
     }
 }
 
-@MainActor
 private enum QuotaImageArtwork {
     /// The mascot as a die-cut sticker: a white border grown from its alpha channel.
-    static let mascot: NSImage? = {
-        #if TESTING
-        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("Assets/UsageImage")
-        #else
-        guard let directory = Bundle.main.resourceURL else { return nil }
-        #endif
-        guard let source = CIImage(contentsOf: directory.appendingPathComponent("ShareMascot.png")) else { return nil }
+    static func sticker(contentsOf url: URL) -> NSImage? {
+        guard let source = CIImage(contentsOf: url) else { return nil }
         let border = (source.extent.height * 0.034).rounded()
         let canvas = source.extent.insetBy(dx: -border, dy: -border)
         let outline = CIImage(color: .white).cropped(to: canvas).applyingFilter("CIBlendWithAlphaMask", parameters: [
@@ -146,7 +146,7 @@ private enum QuotaImageArtwork {
         ])
         guard let image = CIContext().createCGImage(source.composited(over: outline), from: canvas) else { return nil }
         return NSImage(cgImage: image, size: canvas.size)
-    }()
+    }
 }
 
 private enum Palette {
