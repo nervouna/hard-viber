@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in Quota does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you did and what went wrong. For a row with an error or a missing row, paste what 诊断 (Diagnostics) says and the matching lines of ~/Library/Logs/Quota/collector.log, with account details removed.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release (for example 0.3.0) or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - A provider row (wrong value, error or missing)
+        - The list in the menu bar popover
+        - The shareable image
+        - Diagnostics or the log
+        - config.json
+        - Launch at login
+        - Build, test or release scripts
+        - Docs
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Provider tool and version
+      description: Optional. For a provider row, the tool and what its --version prints.
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested fix
+      description: Optional. If you know where the cause is, say so.

@@ -1,8 +1,39 @@
 # Quota
 
-Quota is a macOS menu bar app that shows how much of each AI subscription's quota is left: Claude, OpenAI (Codex), Antigravity (two pools), Kiro and Grok. Click the menu bar icon for the list. Click the list (or press ⌘C) to copy a shareable PNG of it.
+[![Release](https://img.shields.io/github/v/release/nervouna/hard-viber)](https://github.com/nervouna/hard-viber/releases/latest)
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-It is a personal tool: plan labels match one person's subscriptions. Provider tools are found automatically, and [`config.json`](#configuration) overrides where they are and turns providers off.
+<img src="docs/images/poster.png" width="800" alt="Quota's shareable image with sample data: an orange cover reading “Somebody vibed too hard.” next to a black list of six subscriptions, each with its remaining percentage and reset countdown">
+
+A macOS menu bar app that shows how much of each AI subscription's quota is left: Claude, OpenAI (Codex), Antigravity (two pools), Kiro and Grok. It reads each one through the provider's own command-line tool or local data, and copies the list as a shareable image like the one above (sample data).
+
+## Status
+
+Quota is a personal project, built for its author's own subscriptions and at version 0.3. It needs macOS 14 or later, Node.js 22.15 or later, and the tool of each provider you use, signed in (see [Data sources](#data-sources)); rows whose tool is not installed are hidden. It has no account and no server of its own. Plan names come from the tools, except Antigravity's, which its CLI does not report and Quota always shows as Google AI Pro. The interface is in Simplified Chinese; the shareable image is in English. Releases are notarized zip archives on the [releases page](https://github.com/nervouna/hard-viber/releases).
+
+## How it is built
+
+The first version was written by GPT; since then most of the code has been written by Claude Code agents on branches merged into `main`. [CLAUDE.md](CLAUDE.md) holds the rules they follow: the package layout, the single list of rows in `scripts/subscriptions.json`, how tools are found, the pure merge and refresh rules and their tests. See [CONTRIBUTING.md](CONTRIBUTING.md) to report a bug or send a fix, and [SECURITY.md](SECURITY.md) for security problems.
+
+## Install
+
+1. Install Node.js 22.15 or later, for example `brew install node@24`.
+2. Download the zip from the [latest release](https://github.com/nervouna/hard-viber/releases/latest), unzip it and move `Quota.app` to `/Applications` or `~/Applications`.
+3. Open Quota. It has no Dock icon and no window; its icon, a tired laptop, appears in the menu bar.
+
+To start Quota at login, right-click the icon and choose 开机时启动 (Launch at login). It is available only when `Quota.app` is in `/Applications` or `~/Applications`, because the login item records the app's location.
+
+## Use
+
+- Click the icon for the list: each subscription with its remaining percentage and the time until it resets. Exhausted plans and rows Quota could not confirm move below the others and are greyed out.
+- Click the list, or press ⌘C, to copy the shareable image.
+- Right-click the icon for 复制用量图片 (Copy usage image), 刷新 (Refresh), 诊断 (Diagnostics), 开机时启动 (Launch at login) and 退出 Quota (Quit Quota). [Diagnostics](#diagnostics) explains errors and hidden rows.
+- Quota refreshes when you open the list, when you copy the image and after the Mac wakes, and less often in the background; see [When it refreshes](#when-it-refreshes).
+
+## Uninstall
+
+Turn off 开机时启动 if you turned it on, choose 退出 Quota, and delete `Quota.app`. Quota's own files are `~/Library/Application Support/Quota/`, `~/Library/Caches/Quota/` and `~/Library/Logs/Quota/`.
 
 ## Requirements
 
