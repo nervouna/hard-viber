@@ -7,14 +7,14 @@ struct QuotaTests {
 
     @Test("Remaining balances, exhaustion, staleness, countdown boundaries, date-only precision")
     func quotaState() throws {
-        var quota = Quota(id: "grok", provider: "grok", name: "Grok", cycle: "weekly", usedPercent: 99.6, resetsAt: "2026-11-03T03:16:35Z", observedAt: now.timeIntervalSince1970, status: "ready")
+        var quota = Quota(id: "grok", provider: "grok", name: "Grok", cycle: "weekly", usedPercent: 99.6, resetsAt: "2026-11-03T03:16:35Z", observedAt: now.timeIntervalSince1970, status: .ready)
         #expect(quota.subtitle == "—", "Missing plan metadata must not become an invented tier")
         quota.plan = "SuperGrok"
         #expect(quota.subtitle == "SuperGrok")
         let antigravity = try placeholder("antigravity-claude")
         #expect(antigravity.name == "Antigravity" && antigravity.subtitle == "Google AI Pro / Claude + GPT")
         #expect(antigravity.compactSubtitle == "AI Pro / Claude + GPT", "The image uses the short plan label")
-        #expect(quota.group(at: now) == 0)
+        #expect(quota.group(at: now) == .available)
         #expect(quota.percentageText == "0.4%", "The displayed balance must be remaining rather than consumed")
         quota.usedPercent = 99.96
         #expect(quota.percentageText == "<0.1%", "A nonzero balance must not appear exhausted")
@@ -27,17 +27,17 @@ struct QuotaTests {
         quota.usedPercent = 120
         #expect(quota.remainingPercent == 0 && quota.percentageText == "0%", "Overages must not create a negative balance")
         quota.usedPercent = 100
-        #expect(quota.group(at: now) == 1)
+        #expect(quota.group(at: now) == .exhausted)
         #expect(quota.remainingPercent == 0 && quota.percentageText == "0%")
         #expect(quota.accessibilityText(at: now).contains("剩余 0%"))
-        quota.status = "unavailable"
-        #expect(quota.group(at: now) == 2, "Failed queries must not be classified as available or exhausted")
-        quota.status = "ready"
+        quota.status = .unavailable
+        #expect(quota.group(at: now) == .unconfirmed, "Failed queries must not be classified as available or exhausted")
+        quota.status = .ready
         quota.observedAt = now.addingTimeInterval(-901).timeIntervalSince1970
-        #expect(quota.group(at: now) == 2, "Old snapshots must not appear current")
+        #expect(quota.group(at: now) == .unconfirmed, "Old snapshots must not appear current")
         quota.observedAt = now.timeIntervalSince1970
         quota.resetsAt = "2026-10-01T00:00:00Z"
-        #expect(quota.group(at: now) == 2, "Passing a reset deadline does not establish zero usage")
+        #expect(quota.group(at: now) == .unconfirmed, "Passing a reset deadline does not establish zero usage")
         quota.resetsAt = nil
         #expect(quota.resetText(at: now) == "—")
         quota.resetsAt = "2026-12-01"
@@ -53,6 +53,21 @@ struct QuotaTests {
         }
     }
 
+    @Test("Statuses keep the collector's wire format; groups sort in list order")
+    func statusAndGroup() throws {
+        let rows = #"[{"id":"a","provider":"a","name":"A","cycle":"weekly","status":"disabled"},{"id":"b","provider":"b","name":"B","cycle":"weekly","status":"paused"}]"#
+        let decoded = try JSONDecoder().decode([Quota].self, from: Data(rows.utf8))
+        #expect(decoded.map(\.status) == [.disabled, .unavailable], "An unknown status reads as a failed query, not a broken report")
+        #expect(decoded[1].isInstalled && decoded[1].group(at: now) == .unconfirmed)
+        let encoded = try JSONEncoder().encode(Quota.Status.missing)
+        #expect(String(decoding: encoded, as: UTF8.self) == #""missing""#, "The cache keeps the collector's strings")
+        let missingStatus = #"[{"id":"a","provider":"a","name":"A","cycle":"weekly"}]"#
+        #expect(throws: DecodingError.self, "A row without a status is not a row") {
+            try JSONDecoder().decode([Quota].self, from: Data(missingStatus.utf8))
+        }
+        #expect(Quota.Group.allCases.sorted() == [.available, .exhausted, .unconfirmed])
+    }
+
     @Test("The subscription list, cache restore, short plan labels")
     func subscriptionList() throws {
         let ids = subscriptions.map(\.id)
@@ -65,15 +80,15 @@ struct QuotaTests {
         #expect(Subscription.load(from: repository.appendingPathComponent("missing.json")).isEmpty, "A missing list loads as none")
 
         // Display metadata comes from the list; observed values come from the row.
-        var stale = Quota(id: "kiro", provider: "kiro", name: "Kiro Pro", cycle: "weekly", usedPercent: 40, status: "ready")
+        var stale = Quota(id: "kiro", provider: "kiro", name: "Kiro Pro", cycle: "weekly", usedPercent: 40, status: .ready)
         stale.bucket = "Old"
-        let restored = Quota.restore([stale, Quota(id: "retired", provider: "retired", name: "Retired", cycle: "weekly", status: "ready")],
+        let restored = Quota.restore([stale, Quota(id: "retired", provider: "retired", name: "Retired", cycle: "weekly", status: .ready)],
                                      subscriptions: subscriptions)
         #expect(restored.map(\.id) == ids, "Restoring a cache must not add or drop rows")
         let kiro = try row("kiro", in: restored)
         #expect(kiro.name == "Kiro" && kiro.plan == "Pro" && kiro.cycle == "monthly" && kiro.bucket == nil && kiro.usedPercent == 40,
                 "Old Kiro caches keep their tier and take labels from the list")
-        #expect(try row("grok", in: restored).status == "unavailable", "Rows absent from the cache start unavailable")
+        #expect(try row("grok", in: restored).status == .unavailable, "Rows absent from the cache start unavailable")
 
         var reported = antigravity
         #expect(reported.described(by: subscriptions[2]).compactSubtitle == "AI Pro / Gemini")
@@ -87,11 +102,11 @@ struct QuotaTests {
         quota.usedPercent = used
         quota.resetsAt = ISO8601DateFormatter().string(from: date.addingTimeInterval(86_400))
         quota.observedAt = date.timeIntervalSince1970
-        quota.status = "ready"
+        quota.status = .ready
         return quota
     }
 
-    func failure(_ id: String, _ status: String, _ error: String, missingPath: String? = nil) throws -> Quota {
+    func failure(_ id: String, _ status: Quota.Status, _ error: String, missingPath: String? = nil) throws -> Quota {
         var quota = try placeholder(id)
         quota.status = status
         quota.error = error
@@ -105,43 +120,43 @@ struct QuotaTests {
         let partial = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try ready("claude", used: 30, at: now), try ready("grok", used: 50, at: now)])
         let merged = partial.merged(into: placeholders, subscriptions: subscriptions, at: now)
         #expect(merged.map(\.id) == placeholders.map(\.id))
-        #expect(try row("claude", in: merged).group(at: now) == 0 && row("grok", in: merged).usedPercent == 50,
+        #expect(try row("claude", in: merged).group(at: now) == .available && row("grok", in: merged).usedPercent == 50,
                 "Rows present in a partial report must update")
         let openai = try row("openai", in: merged)
-        #expect(openai.status == "unavailable" && openai.error == "Collector protocol: no openai row in the report")
+        #expect(openai.status == .unavailable && openai.error == "Collector protocol: no openai row in the report")
 
         // A failed cycle keeps the last good value ready and records why.
         let good = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try ready("openai", used: 20, at: now)])
             .merged(into: placeholders, subscriptions: subscriptions, at: now)
-        let timeout = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try failure("openai", "unavailable", "OpenAI timeout: no reply")])
+        let timeout = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try failure("openai", .unavailable, "OpenAI timeout: no reply")])
         let soon = now.addingTimeInterval(300)
         let flapped = try row("openai", in: timeout.merged(into: good, subscriptions: subscriptions, at: soon))
-        #expect(flapped.status == "ready" && flapped.group(at: soon) == 0 && flapped.usedPercent == 20,
+        #expect(flapped.status == .ready && flapped.group(at: soon) == .available && flapped.usedPercent == 20,
                 "One failed cycle must not grey out a fresh value")
         #expect(flapped.error == "OpenAI timeout: no reply", "The failure must still be recorded")
         #expect(flapped.accessibilityText(at: soon).contains("错误：OpenAI timeout: no reply"))
 
         // The freshness window, not the failure, decides when the row goes stale.
         let later = now.addingTimeInterval(901)
-        #expect(flapped.group(at: later) == 2, "A value past the freshness window must go stale")
+        #expect(flapped.group(at: later) == .unconfirmed, "A value past the freshness window must go stale")
         let demoted = try row("openai", in: timeout.merged(into: [flapped], subscriptions: subscriptions, at: later))
-        #expect(demoted.status == "unavailable" && demoted.group(at: later) == 2)
+        #expect(demoted.status == .unavailable && demoted.group(at: later) == .unconfirmed)
 
         // A tool that is not installed is hidden, and success clears errors.
         let notInstalled = UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [
-            try failure("grok", "missing", "Grok spawn: /opt/homebrew/bin/grok is not installed", missingPath: "/opt/homebrew/bin/grok"),
+            try failure("grok", .missing, "Grok spawn: /opt/homebrew/bin/grok is not installed", missingPath: "/opt/homebrew/bin/grok"),
         ])
         let grok = try row("grok", in: notInstalled.merged(into: placeholders, subscriptions: subscriptions, at: now))
-        #expect(grok.status == "missing" && !grok.isInstalled && grok.missingPath == "/opt/homebrew/bin/grok")
+        #expect(grok.status == .missing && !grok.isInstalled && grok.missingPath == "/opt/homebrew/bin/grok")
         let vanished = try row("grok", in: notInstalled.merged(into: [try ready("grok", used: 10, at: now)], subscriptions: subscriptions, at: soon))
-        #expect(vanished.isInstalled && vanished.group(at: soon) == 0 && vanished.error?.hasSuffix("is not installed") == true,
+        #expect(vanished.isInstalled && vanished.group(at: soon) == .available && vanished.error?.hasSuffix("is not installed") == true,
                 "A fresh value stays visible with the reason until it goes stale")
         let uninstalled = try row("grok", in: notInstalled.merged(into: [try ready("grok", used: 10, at: now)], subscriptions: subscriptions, at: later))
         #expect(!uninstalled.isInstalled, "A stale row whose tool disappeared must be hidden")
         let recovered = try row("grok", in: UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try ready("grok", used: 10, at: now)])
             .merged(into: [grok], subscriptions: subscriptions, at: now))
         #expect(recovered.isInstalled && recovered.error == nil && recovered.missingPath == nil, "A successful query must clear the error")
-        let timedOut = try row("grok", in: UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try failure("grok", "unavailable", "Grok timeout: no reply")])
+        let timedOut = try row("grok", in: UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [try failure("grok", .unavailable, "Grok timeout: no reply")])
             .merged(into: [grok], subscriptions: subscriptions, at: now))
         #expect(timedOut.isInstalled && timedOut.missingPath == nil, "Only a clear not-installed signal hides a row")
 
@@ -156,17 +171,17 @@ struct QuotaTests {
         #expect(try row("openai", in: claudeOnly).error == nil, "Uncovered rows absent from the report are not an error")
 
         // A provider turned off in config.json is hidden at once, even with a fresh value.
-        var off = try failure("grok", "disabled", "")
+        var off = try failure("grok", .disabled, "")
         off.error = nil
         let disabled = try row("grok", in: UsageReport(fetchedAt: now.timeIntervalSince1970, quotas: [off], providers: ["grok"])
             .merged(into: start, subscriptions: subscriptions, at: soon))
-        #expect(disabled.status == "disabled" && !disabled.isInstalled && disabled.usedPercent == nil)
+        #expect(disabled.status == .disabled && !disabled.isInstalled && disabled.usedPercent == nil)
 
         // With hourly background refreshes the last good value is past its window when a refresh
         // fails, so the row turns grey; the policy retries it five minutes later.
         let hourLater = now.addingTimeInterval(3600)
         let failedLate = try row("openai", in: timeout.merged(into: good, subscriptions: subscriptions, at: hourLater))
-        #expect(failedLate.status == "unavailable" && failedLate.group(at: hourLater) == 2)
+        #expect(failedLate.status == .unavailable && failedLate.group(at: hourLater) == .unconfirmed)
         #expect(!RefreshPolicy.isDue(local: false, lastRun: hourLater, failures: 1, conditions: PowerConditions(), at: hourLater.addingTimeInterval(299)))
         #expect(RefreshPolicy.isDue(local: false, lastRun: hourLater, failures: 1, conditions: PowerConditions(), at: hourLater.addingTimeInterval(300)))
     }
@@ -175,7 +190,7 @@ struct QuotaTests {
     func diagnostics() throws {
         let report = #"{"fetchedAt":1,"quotas":[{"id":"grok","provider":"grok","name":"Grok","cycle":"weekly","status":"missing","error":"Grok spawn: x"}]}"#
         let decoded = try UsageReport.decode(Data(report.utf8), terminationStatus: 0, timedOut: false).get()
-        #expect(decoded.quotas.first?.status == "missing" && decoded.providers == nil, "Reports without a scope cover every provider")
+        #expect(decoded.quotas.first?.status == .missing && decoded.providers == nil, "Reports without a scope cover every provider")
         let scoped = #"{"fetchedAt":1,"providers":["grok"],"warnings":["Collector config: x"],"quotas":[{"id":"grok","provider":"grok","name":"Grok","cycle":"weekly","status":"missing","checkedPaths":["/a/grok","/b/grok"]}]}"#
         let partial = try UsageReport.decode(Data(scoped.utf8), terminationStatus: 0, timedOut: false).get()
         #expect(partial.providers == ["grok"] && partial.warnings == ["Collector config: x"])
@@ -194,14 +209,14 @@ struct QuotaTests {
         var quotas = placeholders
         #expect(Quota.problems(in: quotas).isEmpty && Quota.problems(in: []) == [Problem("subscriptions.json is missing or invalid")])
         for index in [2, 3] {
-            quotas[index].status = "missing"
+            quotas[index].status = .missing
             quotas[index].error = "Antigravity spawn: agy is not installed (checked 2 paths)"
             quotas[index].missingPath = "/opt/homebrew/bin/agy"
             quotas[index].checkedPaths = ["/opt/homebrew/bin/agy", "~/.local/bin/agy"]
         }
-        quotas[4].status = "missing"
+        quotas[4].status = .missing
         quotas[4].missingPath = "/opt/homebrew/bin/container"
-        quotas[1].status = "disabled"
+        quotas[1].status = .disabled
         quotas[5].error = "Grok timeout: no reply"
         #expect(Quota.problems(in: quotas, warnings: ["Collector config: unknown provider gork"]) == [
             Problem("Collector config: unknown provider gork"),
@@ -255,15 +270,15 @@ struct QuotaTests {
         quota.usedPercent = 40
         quota.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(86_400))
         quota.observedAt = now.addingTimeInterval(-3600).timeIntervalSince1970
-        quota.status = "ready"
-        #expect(quota.group(at: now) == 2 && quota.group(at: now, refreshing: true) == 0)
+        quota.status = .ready
+        #expect(quota.group(at: now) == .unconfirmed && quota.group(at: now, refreshing: true) == .available)
         #expect(quota.accessibilityText(at: now, refreshing: true).contains("正在刷新") && quota.accessibilityText(at: now).contains("无法确认"))
         var failed = quota
-        failed.status = "unavailable"
-        #expect(failed.group(at: now, refreshing: true) == 2, "A failed row stays grey while it retries")
+        failed.status = .unavailable
+        #expect(failed.group(at: now, refreshing: true) == .unconfirmed, "A failed row stays grey while it retries")
         var expired = quota
         expired.resetsAt = ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))
-        #expect(expired.group(at: now, refreshing: true) == 2, "A passed reset is not current while refreshing")
+        #expect(expired.group(at: now, refreshing: true) == .unconfirmed, "A passed reset is not current while refreshing")
 
         // Copying waits only for a refresh that may confirm a row the image would show as stale.
         var fresh = quota
@@ -272,7 +287,7 @@ struct QuotaTests {
         #expect(!Quota.awaitsConfirmation([quota], refreshing: [], at: now), "Nothing to wait for")
         #expect(!Quota.awaitsConfirmation([fresh], refreshing: ["grok"], at: now), "A current value is copied at once")
         var hidden = quota
-        hidden.status = "missing"
+        hidden.status = .missing
         #expect(!Quota.awaitsConfirmation([hidden], refreshing: ["grok"], at: now), "Hidden rows are not in the image")
     }
 

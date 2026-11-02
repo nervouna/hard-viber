@@ -37,15 +37,43 @@ struct Quota: Codable, Identifiable, Sendable {
     var usedPercent: Double?
     var resetsAt: String?
     var observedAt: Double?
-    var status: String
+    var status: Status
     var error: String?
-    /// The executable or file that was checked when `status` is "missing".
+    /// The executable or file that was checked when `status` is `.missing`.
     var missingPath: String?
-    /// Every path that was checked when `status` is "missing".
+    /// Every path that was checked when `status` is `.missing`.
     var checkedPaths: [String]?
 
+    /// The collector's verdict on a row, written as its raw value in the report and the cache.
+    enum Status: String, Codable, Sendable {
+        case ready
+        /// The query failed; `error` says why.
+        case unavailable
+        /// No candidate executable exists (nor Kiro's container, nor Claude's history file).
+        case missing
+        /// Turned off in config.json.
+        case disabled
+
+        /// A status this version does not know, from a newer collector or cache, reads as a failed
+        /// query instead of failing the whole report.
+        init(from decoder: Decoder) throws {
+            self = Status(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unavailable
+        }
+    }
+
+    /// Where a row sits in the list. The cases are declared in list order, top to bottom, which is
+    /// also their `Comparable` order.
+    enum Group: CaseIterable, Comparable, Sendable {
+        /// A current value with quota left.
+        case available
+        /// A current value with none left.
+        case exhausted
+        /// Stale or failed: the value cannot be confirmed.
+        case unconfirmed
+    }
+
     /// Rows of a tool that is not installed, or that is turned off in config.json, are hidden.
-    var isInstalled: Bool { status != "missing" && status != "disabled" }
+    var isInstalled: Bool { status != .missing && status != .disabled }
 
     var subtitle: String {
         let label = plan?.isEmpty == false ? plan! : "—"
@@ -98,20 +126,20 @@ struct Quota: Codable, Identifiable, Sendable {
         return String(format: "%.0f%%", value)
     }
 
-    /// 0 current, 1 exhausted, 2 stale or failed. A value older than its freshness window is stale
-    /// (the collector's Claude read uses the same 1800 s), except while `refreshing`: a refresh that
-    /// may confirm it is under way, so it keeps its place instead of turning grey for a few seconds.
-    func group(at date: Date, refreshing: Bool = false) -> Int {
-        guard status == "ready", let value = usedPercent, value.isFinite, value >= 0,
+    /// A value older than its freshness window is unconfirmed (the collector's Claude read uses the
+    /// same 1800 s), except while `refreshing`: a refresh that may confirm it is under way, so it
+    /// keeps its place instead of turning grey for a few seconds.
+    func group(at date: Date, refreshing: Bool = false) -> Group {
+        guard status == .ready, let value = usedPercent, value.isFinite, value >= 0,
               let observedAt, let resetDate, resetDate > date,
               refreshing || date.timeIntervalSince1970 - observedAt <= (provider == "claude" ? 1800 : 900)
-        else { return 2 }
-        return value >= 100 ? 1 : 0
+        else { return .unconfirmed }
+        return value >= 100 ? .exhausted : .available
     }
 
     func accessibilityText(at date: Date, refreshing: Bool = false) -> String {
         let reason = error.map { "，错误：\($0)" } ?? ""
-        let freshness = refreshing ? "，正在刷新" : group(at: date) == 2 ? "，数据暂时无法确认" : ""
+        let freshness = refreshing ? "，正在刷新" : group(at: date) == .unconfirmed ? "，数据暂时无法确认" : ""
         let window = cycle == "monthly" ? "月度" : "每周"
         return "\(name)，\(subtitle)，\(window)剩余 \(percentageText)，重置倒计时 \(resetText(at: date))\(freshness)\(reason)"
     }
@@ -121,7 +149,7 @@ struct Quota: Codable, Identifiable, Sendable {
 extension Quota {
     init(_ subscription: Subscription) {
         self.init(id: subscription.id, provider: subscription.provider, name: subscription.name, cycle: subscription.cycle,
-                  plan: subscription.plan, shortPlan: subscription.shortPlan, bucket: subscription.bucket, status: "unavailable")
+                  plan: subscription.plan, shortPlan: subscription.shortPlan, bucket: subscription.bucket, status: .unavailable)
     }
 
     /// Keeps the observed values and takes everything else from the subscription list.
@@ -142,12 +170,12 @@ extension Quota {
 
     /// Records a failed query. A good value stays ready until the freshness window in
     /// `group(at:)` expires, so one failed cycle does not grey out the row.
-    func failed(_ status: String, error: String, missingPath: String? = nil, checkedPaths: [String]? = nil, at date: Date) -> Quota {
+    func failed(_ status: Status, error: String, missingPath: String? = nil, checkedPaths: [String]? = nil, at date: Date) -> Quota {
         var value = self
         value.error = error
         value.missingPath = missingPath
         value.checkedPaths = checkedPaths
-        if group(at: date) == 2 { value.status = status }
+        if group(at: date) == .unconfirmed { value.status = status }
         return value
     }
 
@@ -168,8 +196,8 @@ extension Quota {
         let lines = (quotas.isEmpty ? [Problem("subscriptions.json is missing or invalid")] : []) + warnings.map { Problem($0) }
             + quotas.compactMap { quota -> Problem? in
                 switch quota.status {
-                case "missing": Problem("未检测到：\(quota.name)", paths: quota.checkedPaths ?? quota.missingPath.map { [$0] } ?? [])
-                case "disabled": Problem("已停用：\(quota.name)")
+                case .missing: Problem("未检测到：\(quota.name)", paths: quota.checkedPaths ?? quota.missingPath.map { [$0] } ?? [])
+                case .disabled: Problem("已停用：\(quota.name)")
                 default: quota.error.map { Problem($0) }
                 }
             }
@@ -179,7 +207,7 @@ extension Quota {
     /// Whether copying should wait: a row would show as stale in the image, and a refresh that may
     /// confirm it is under way.
     static func awaitsConfirmation(_ quotas: [Quota], refreshing: Set<String>, at date: Date) -> Bool {
-        quotas.contains { $0.isInstalled && refreshing.contains($0.provider) && $0.group(at: date) == 2 }
+        quotas.contains { $0.isInstalled && refreshing.contains($0.provider) && $0.group(at: date) == .unconfirmed }
     }
 }
 
@@ -224,9 +252,9 @@ struct UsageReport: Decodable {
             let previous = current.first { $0.id == subscription.id } ?? Quota(subscription)
             if let providers, !providers.contains(subscription.provider) { return previous }
             guard let fresh = quotas.first(where: { $0.id == subscription.id }) else {
-                return previous.failed("unavailable", error: "Collector protocol: no \(subscription.id) row in the report", at: date)
+                return previous.failed(.unavailable, error: "Collector protocol: no \(subscription.id) row in the report", at: date)
             }
-            guard fresh.status != "ready", fresh.status != "disabled" else { return fresh.described(by: subscription) }
+            guard fresh.status != .ready, fresh.status != .disabled else { return fresh.described(by: subscription) }
             return previous.failed(fresh.status, error: fresh.error ?? "\(subscription.name) failed without a reason",
                                    missingPath: fresh.missingPath, checkedPaths: fresh.checkedPaths, at: date)
         }

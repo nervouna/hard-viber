@@ -135,7 +135,7 @@ final class UsageStore: ObservableObject {
             warnings = report.warnings ?? []
             for provider in run.providers {
                 let rows = report.quotas.filter { $0.provider == provider }
-                failures[provider] = rows.isEmpty || rows.contains { $0.status == "unavailable" } ? (failures[provider] ?? 0) + 1 : 0
+                failures[provider] = rows.isEmpty || rows.contains { $0.status == .unavailable } ? (failures[provider] ?? 0) + 1 : 0
             }
             for problem in Quota.problems(in: quotas.filter { run.providers.contains($0.provider) }) where problem.text.hasPrefix("Collector ") {
                 CollectorLog.append(problem.text)
@@ -148,7 +148,7 @@ final class UsageStore: ObservableObject {
 
     private func fail(_ message: String, providers: Set<String>) {
         CollectorLog.append(message)
-        quotas = quotas.map { providers.contains($0.provider) ? $0.failed("unavailable", error: message, at: Date()) : $0 }
+        quotas = quotas.map { providers.contains($0.provider) ? $0.failed(.unavailable, error: message, at: Date()) : $0 }
         for provider in providers { failures[provider, default: 0] += 1 }
     }
 

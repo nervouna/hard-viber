@@ -1,7 +1,7 @@
 import SwiftUI
 
-func quotaColor(for group: Int, remaining: Double?) -> Color {
-    guard group == 0, let remaining, remaining > 0 else { return .secondary }
+func quotaColor(for group: Quota.Group, remaining: Double?) -> Color {
+    guard group == .available, let remaining, remaining > 0 else { return .secondary }
     if remaining > 50 { return Color(red: 0.23, green: 0.53, blue: 0.43) }
     if remaining > 20 { return Color(red: 0.62, green: 0.42, blue: 0.10) }
     return Color(red: 0.78, green: 0.36, blue: 0.29)
@@ -9,7 +9,7 @@ func quotaColor(for group: Int, remaining: Double?) -> Color {
 
 struct QuotaRing: View {
     let quota: Quota
-    let group: Int
+    let group: Quota.Group
     var size: CGFloat = 18
     var lineWidth: CGFloat = 2.5
     var hidesUnconfirmed = false
@@ -27,8 +27,8 @@ struct QuotaRing: View {
     @ViewBuilder private var ring: some View {
         let color = quotaColor(for: group, remaining: quota.remainingPercent)
         ZStack {
-            Circle().stroke(color.opacity(group == 2 ? 0.15 : 0.2), lineWidth: lineWidth)
-            if let value = quota.remainingPercent, value > 0, !(hidesUnconfirmed && group == 2) {
+            Circle().stroke(color.opacity(group == .unconfirmed ? 0.15 : 0.2), lineWidth: lineWidth)
+            if let value = quota.remainingPercent, value > 0, !(hidesUnconfirmed && group == .unconfirmed) {
                 let fraction = min(1, value / 100)
                 // Round caps must not fill the final gap of a nearly full ring.
                 let cap = lineWidth / (2 * .pi * size)
@@ -36,7 +36,7 @@ struct QuotaRing: View {
                 let end = fraction == 1 ? 1 : max(start + 0.00001, fraction - cap)
                 Circle()
                     .trim(from: start, to: end)
-                    .stroke(color.opacity(group == 2 ? 0.4 : 1), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .stroke(color.opacity(group == .unconfirmed ? 0.4 : 1), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
         }
@@ -59,7 +59,7 @@ struct QuotaRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(quota.name)
                     .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(group == 0 ? .primary : .secondary)
+                    .foregroundStyle(group == .available ? .primary : .secondary)
                 Text(quota.subtitle)
                     .font(.system(size: 10.5, weight: .regular))
                     .foregroundStyle(.secondary)
@@ -70,7 +70,7 @@ struct QuotaRow: View {
                 Text(quota.percentageText)
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(group == 0 ? .primary : .secondary)
+                    .foregroundStyle(group == .available ? .primary : .secondary)
                     .minimumScaleFactor(0.85)
                 Text(quota.resetText(at: now))
                     .font(.system(size: 10.5, weight: .regular))
@@ -97,9 +97,8 @@ struct QuotaPanel: View {
         TimelineView(.periodic(from: .now, by: 30)) { timeline in
             let quotas = store.installedQuotas
             let refreshing = store.refreshing
-            let groups = (0...2).map { group in
-                quotas.filter { $0.group(at: timeline.date, refreshing: refreshing.contains($0.provider)) == group }
-            }.filter { !$0.isEmpty }
+            let groups = Dictionary(grouping: quotas) { $0.group(at: timeline.date, refreshing: refreshing.contains($0.provider)) }
+                .sorted { $0.key < $1.key }.map(\.value)
             VStack(spacing: 0) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, quotas in
                     if index > 0 {

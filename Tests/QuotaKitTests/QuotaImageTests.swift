@@ -27,7 +27,7 @@ struct QuotaImageTests {
             quota.plan = samples[index].0
             quota.usedPercent = samples[index].1
             quota.observedAt = now.timeIntervalSince1970
-            quota.status = "ready"
+            quota.status = .ready
             quota.resetsAt = quota.provider == "kiro" ? "2026-12-01" :
                 ISO8601DateFormatter().string(from: now.addingTimeInterval(samples[index].2 * 3600))
             return quota
@@ -41,7 +41,7 @@ struct QuotaImageTests {
     /// Two rows gone unknown, plus a nonzero balance below 0.1%.
     var stale: [Quota] {
         var stale = quotas
-        stale[0].status = "unavailable"
+        stale[0].status = .unavailable
         stale[1].observedAt = now.addingTimeInterval(-901).timeIntervalSince1970
         stale[4].usedPercent = 99.96
         return stale
@@ -50,15 +50,15 @@ struct QuotaImageTests {
     /// Four installed tools, then two.
     var fourRows: [Quota] {
         var installed = quotas
-        installed[3].status = "missing"
-        installed[4].status = "missing"
+        installed[3].status = .missing
+        installed[4].status = .missing
         return installed
     }
 
     var twoRows: [Quota] {
         var installed = fourRows
-        installed[2].status = "missing"
-        installed[5].status = "missing"
+        installed[2].status = .missing
+        installed[5].status = .missing
         return installed
     }
 
@@ -66,7 +66,7 @@ struct QuotaImageTests {
     var renders: [(String, [Quota])] {
         [("fixture", quotas), ("edge-cases", stale), ("four-rows", fourRows), ("two-rows", twoRows),
          ("three-rows", [quotas[0], quotas[1], quotas[4]]), ("single", [quotas[0]]),
-         ("full", with(quotas) { $0.usedPercent = 0 }), ("silent", with(quotas) { $0.status = "unavailable" })]
+         ("full", with(quotas) { $0.usedPercent = 0 }), ("silent", with(quotas) { $0.status = .unavailable })]
     }
 
     func bitmap(_ quotas: [Quota]) throws -> NSBitmapImageRep {
@@ -97,14 +97,14 @@ struct QuotaImageTests {
 
         // Unknown rows are never reported as dead, whatever their last value was.
         let unknownOnly = with(quotas) { $0.usedPercent = $0.id == "grok" ? 100 : 30 }
-            .enumerated().map { index, quota in var quota = quota; if index == 5 { quota.status = "unavailable" }; return quota }
+            .enumerated().map { index, quota in var quota = quota; if index == 5 { quota.status = .unavailable }; return quota }
         let unknownSummary = QuotaImageSummary(unknownOnly, at: now)
         #expect(unknownSummary.mood == .healthy && unknownSummary.exhausted.isEmpty)
         #expect(unknownSummary.deck == "One plan didn't report back.")
         #expect(!(0..<3).map(unknownSummary.headline).contains { $0.contains("dead") || $0.contains("fried") })
-        let silent = QuotaImageSummary(with(quotas) { $0.status = "unavailable" }, at: now)
+        let silent = QuotaImageSummary(with(quotas) { $0.status = .unavailable }, at: now)
         #expect(silent.mood == .unknown && silent.deck == "None of the six plans reported back.")
-        let quietClaude = QuotaImageSummary([with(quotas) { $0.status = "unavailable" }[0]], at: now)
+        let quietClaude = QuotaImageSummary([with(quotas) { $0.status = .unavailable }[0]], at: now)
         #expect(quietClaude.deck == "No fresh numbers. Unknown, not dead." && quietClaude.headline(variant: 0) == "Claude went quiet.")
 
         let full = QuotaImageSummary(with(quotas) { $0.usedPercent = 0 }, at: now)
@@ -134,7 +134,7 @@ struct QuotaImageTests {
         #expect(near(three, [255, 210, 31]), "A plan on fumes turns the cover yellow: \(three)")
         let full = try cover(with(quotas) { $0.usedPercent = 0 })
         #expect(near(full, [198, 244, 58]), "Healthy plans turn the cover lime: \(full)")
-        let silent = try cover(with(quotas) { $0.status = "unavailable" })
+        let silent = try cover(with(quotas) { $0.status = .unavailable })
         #expect(near(silent, [204, 204, 204]), "No data leaves the cover grey: \(silent)")
         for (_, quotas) in renders { _ = try bitmap(quotas) }
         let png = try #require(try bitmap(quotas).representation(using: .png, properties: [:]))
@@ -144,7 +144,7 @@ struct QuotaImageTests {
     @Test("Tools that are not installed are left out")
     func hiddenTools() {
         #expect(QuotaImageExporter.orderedQuotas(fourRows, at: now).map(\.id) == ["claude", "openai", "antigravity-gemini", "grok"])
-        #expect(exporter.render(with(quotas) { $0.status = "missing" }, at: now) == nil, "Nothing to export when no tool is installed")
+        #expect(exporter.render(with(quotas) { $0.status = .missing }, at: now) == nil, "Nothing to export when no tool is installed")
         #expect(QuotaImageExporter(mascot: repository.appendingPathComponent("missing.png")).render(quotas, at: now) == nil,
                 "Nothing to export without the artwork")
     }
