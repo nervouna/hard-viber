@@ -21,7 +21,7 @@ final class LaunchAtLogin: NSObject, NSMenuItemValidation {
         // so a build in a worktree or build/ must not make one.
         guard isInApplicationsFolder else {
             menuItem.state = .off
-            menuItem.toolTip = "运行 scripts/install.sh 把 Quota 安装到 ~/Applications 后可用"
+            menuItem.toolTip = "把 Quota 放进 /Applications 或 ~/Applications 后可用"
             return false
         }
         switch SMAppService.mainApp.status {
