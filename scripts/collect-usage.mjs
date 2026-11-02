@@ -77,6 +77,16 @@ function spawnError(executable, error) {
 
 const isFile = file => { try { return fs.statSync(file).isFile(); } catch { return false; } };
 
+// A tool's home directory, where it keeps its sign-in. An app launched from Finder or at login does
+// not see variables exported by the shell profile, so the directories tool installers use are
+// tried when the variable is unset.
+export function toolHome(variable, configured, guesses) {
+  if (configured) return { [variable]: expand(configured) };
+  if (process.env[variable]) return {};
+  const found = guesses.find(directory => fs.existsSync(directory));
+  return found ? { [variable]: found } : {};
+}
+
 // A configured path is the only candidate. Otherwise `first` (known app bundles), the search
 // directories and `last` are tried in order, and the first file that exists wins.
 export function locate(name, configured, { first = [], last = [], directories = searchDirectories } = {}) {
@@ -95,7 +105,7 @@ const settingNames = {
   openai: ['executable', 'codexHome'],
   antigravity: ['executable', 'dataDir'],
   kiro: ['executable', 'container', 'user', 'workdir'],
-  grok: ['executable'],
+  grok: ['executable', 'grokHome'],
 };
 
 // Reads the user's overrides. A missing file means defaults. A broken file or setting is
@@ -280,6 +290,7 @@ export function readClaude(directory, statePath = claudeStatePath, now = Date.no
 const claudeDirectory = path.join(home, 'Library/Application Support/Claude');
 const chatGPTCodex = 'ChatGPT.app/Contents/Resources/codex-cli/bin/codex';
 const antigravityLegacyData = path.join(home, 'Library/Application Support/AntigravityCLI');
+const grokBuild = path.join(home, 'Library/Application Support/Grok Build');
 
 export const collectors = {
   claude: {
@@ -304,9 +315,7 @@ export const collectors = {
     query: ({ executable, codexHome }) => {
       // The Codex bundled with ChatGPT comes first; a standalone `codex` may use another home.
       const codex = locate('codex', executable, { first: ['/Applications', path.join(home, 'Applications')].map(folder => path.join(folder, chatGPTCodex)) });
-      const canonicalHome = path.join(home, '.local/share/codex');
-      const env = codexHome ? { CODEX_HOME: expand(codexHome) }
-        : !process.env.CODEX_HOME && fs.existsSync(canonicalHome) ? { CODEX_HOME: canonicalHome } : {};
+      const env = toolHome('CODEX_HOME', codexHome, [path.join(home, '.local/share/codex'), path.join(home, 'Library/Application Support/Codex/home')]);
       return rpc(
         codex, ['app-server'],
         { clientInfo: { name: 'quota', version }, capabilities: { experimentalApi: true } },
@@ -316,11 +325,11 @@ export const collectors = {
     parse: normalizeOpenAI,
   },
   grok: {
-    query: ({ executable }) => rpc(
-      locate('grok', executable, { last: [path.join(home, 'Library/Application Support/Grok Build/bin/grok')] }),
+    query: ({ executable, grokHome }) => rpc(
+      locate('grok', executable, { last: [path.join(grokBuild, 'bin/grok')] }),
       ['agent', '--no-leader', 'stdio'],
       { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'quota', version } },
-      '_x.ai/billing', { action: 'get' },
+      '_x.ai/billing', { action: 'get' }, { env: toolHome('GROK_HOME', grokHome, [grokBuild]) },
     ),
     parse: normalizeGrok,
   },

@@ -236,6 +236,10 @@ struct QuotaTests {
         precondition(!due(false, after: 3599, failures: 3) && due(false, after: 3600, failures: 3), "After two retries the usual interval applies")
         precondition(!due(true, after: 299, failures: 1) && due(true, after: 300, failures: 1))
         precondition(!due(false, after: 3 * 3600, failures: 1, lowPower), "Retries never run where there is no background refresh")
+        for conditions in [ac, battery, lowPower, hot] {
+            precondition(RefreshPolicy.interval(local: false, conditions, panelOpen: true) == 300, "An open panel refreshes every 5 minutes")
+        }
+        precondition(RefreshPolicy.isDue(local: false, lastRun: now, failures: 0, conditions: lowPower, panelOpen: true, at: now.addingTimeInterval(300)))
 
         // A value past its window stays in place, unconfirmed, while a refresh may confirm it.
         var quota = Quota.placeholders.first { $0.id == "grok" }!

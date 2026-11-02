@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   collect, collectors, command, loadConfig, locate, normalizeAntigravity, normalizeClaude, normalizeGrok, normalizeKiro, normalizeOpenAI,
-  rpc, subscriptions, version,
+  rpc, subscriptions, toolHome, version,
 } from './collect-usage.mjs';
 
 // Keep unlike billing windows distinct, and convert remaining into consumed usage.
@@ -135,13 +135,23 @@ const initializer = config('rpc', `#!${process.execPath}
 require('readline').createInterface({ input: process.stdin }).on('line', line => {
   const { id, params } = JSON.parse(line);
   if (id === 1) globalThis.initialize = params;
-  if (id === 1 || id === 2) process.stdout.write(JSON.stringify({ id, result: { initialize: globalThis.initialize, codexHome: process.env.CODEX_HOME } }) + '\\n');
+  if (id === 1 || id === 2) process.stdout.write(JSON.stringify({ id, result: { initialize: globalThis.initialize, codexHome: process.env.CODEX_HOME, grokHome: process.env.GROK_HOME } }) + '\\n');
 });
 `);
 fs.chmodSync(initializer, 0o755);
 assert.equal((await collectors.grok.query({ executable: initializer })).initialize.clientInfo.version, version);
+assert.equal((await collectors.grok.query({ executable: initializer, grokHome: '/grok-home' })).grokHome, '/grok-home');
 const openaiResult = await collectors.openai.query({ executable: initializer, codexHome: '~/codex-home' });
 assert.deepEqual([openaiResult.initialize.clientInfo.version, openaiResult.codexHome], [version, path.join(os.homedir(), 'codex-home')]);
+// Home directories: the setting, then the inherited variable, then the first guess that exists.
+const variable = 'QUOTA_TEST_HOME';
+delete process.env[variable];
+assert.deepEqual(toolHome(variable, '~/set', [first]), { [variable]: path.join(os.homedir(), 'set') });
+assert.deepEqual(toolHome(variable, undefined, ['/nonexistent', first, second]), { [variable]: first });
+assert.deepEqual(toolHome(variable, undefined, ['/nonexistent']), {});
+process.env[variable] = '/inherited';
+assert.deepEqual(toolHome(variable, undefined, [first]), {}, 'An inherited variable is kept');
+delete process.env[variable];
 assert.equal(version, fs.readFileSync(new URL('../VERSION', import.meta.url), 'utf8').trim(), 'clientInfo sends the VERSION file');
 assert.match(version, /^\d+\.\d+\.\d+$/);
 

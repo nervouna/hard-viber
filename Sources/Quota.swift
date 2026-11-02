@@ -257,6 +257,8 @@ final class UsageStore: ObservableObject {
     /// Failed queries in a row, per provider.
     private var failures: [String: Int] = [:]
     private var timer: Timer?
+    /// Set while the popover is shown.
+    var panelOpen = false
     private let cacheURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Quota/usage.json")
 
@@ -300,7 +302,8 @@ final class UsageStore: ObservableObject {
         let conditions = PowerConditions.current()
         let now = Date()
         run(Set(Subscription.providers.filter {
-            RefreshPolicy.isDue(local: Subscription.isLocal($0), lastRun: lastRun[$0], failures: failures[$0] ?? 0, conditions: conditions, at: now)
+            RefreshPolicy.isDue(local: Subscription.isLocal($0), lastRun: lastRun[$0], failures: failures[$0] ?? 0,
+                                conditions: conditions, panelOpen: panelOpen, at: now)
         }))
     }
 
@@ -420,6 +423,15 @@ struct QuotaRing: View {
     var refreshing = false
 
     var body: some View {
+        // A separate branch, so the pulse stops with the refresh instead of at an arbitrary phase.
+        if refreshing {
+            ring.phaseAnimator([1, 0.3]) { ring, opacity in ring.opacity(opacity) } animation: { _ in .easeInOut(duration: 0.7) }
+        } else {
+            ring
+        }
+    }
+
+    @ViewBuilder private var ring: some View {
         let color = quotaColor(for: group, remaining: quota.remainingPercent)
         ZStack {
             Circle().stroke(color.opacity(group == 2 ? 0.15 : 0.2), lineWidth: lineWidth)
@@ -436,7 +448,6 @@ struct QuotaRing: View {
             }
         }
         .frame(width: size, height: size)
-        .phaseAnimator(refreshing ? [1, 0.3] : [1]) { ring, opacity in ring.opacity(opacity) } animation: { _ in .easeInOut(duration: 0.7) }
         .accessibilityHidden(true)
     }
 }
@@ -447,15 +458,15 @@ struct QuotaRow: View {
     var refreshing = false
 
     var body: some View {
+        // While its refresh runs, a value past its freshness window keeps its place and color; the
+        // ring pulses until the refresh confirms it or the row turns grey.
         let group = quota.group(at: now, refreshing: refreshing)
-        // A value past its freshness window stays in place while its refresh runs, but in grey.
-        let confirmed = group != 2 && quota.group(at: now) == group
         HStack(spacing: 8) {
-            QuotaRing(quota: quota, group: confirmed ? group : 2, refreshing: refreshing)
+            QuotaRing(quota: quota, group: group, refreshing: refreshing)
             VStack(alignment: .leading, spacing: 1) {
                 Text(quota.name)
                     .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(group == 0 && confirmed ? .primary : .secondary)
+                    .foregroundStyle(group == 0 ? .primary : .secondary)
                 Text(quota.subtitle)
                     .font(.system(size: 10.5, weight: .regular))
                     .foregroundStyle(.secondary)
@@ -466,7 +477,7 @@ struct QuotaRow: View {
                 Text(quota.percentageText)
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(group == 0 && confirmed ? .primary : .secondary)
+                    .foregroundStyle(group == 0 ? .primary : .secondary)
                     .minimumScaleFactor(0.85)
                 Text(quota.resetText(at: now))
                     .font(.system(size: 10.5, weight: .regular))
@@ -522,7 +533,7 @@ struct QuotaPanel: View {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSPopoverDelegate {
     private let store = UsageStore()
     private var item: NSStatusItem!
     private let popover = NSPopover()
@@ -548,6 +559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
         let controller = NSHostingController(rootView: QuotaPanel(store: store, onCopy: { [weak self] in self?.copyUsageImage() }))
         controller.sizingOptions = [.preferredContentSize]
         popover.contentViewController = controller
@@ -593,12 +605,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func show() {
         guard let button = item.button else { return }
+        store.panelOpen = true
         store.refresh()
         resize()
         NSApplication.shared.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }
+
+    func popoverDidClose(_ notification: Notification) { store.panelOpen = false }
 
     @objc private func toggle() {
         if NSApplication.shared.currentEvent?.type == .rightMouseUp {
