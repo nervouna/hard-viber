@@ -186,6 +186,24 @@ export function normalizeClaude(value) {
   throw new Error('No Claude weekly usage in the desktop cache');
 }
 
+// Kiro runs inside a container. Without the container Kiro counts as not installed, but only
+// when the container list says so: a stopped container or a stopped container service is an error.
+export async function queryKiro(container = '/opt/homebrew/bin/container') {
+  try {
+    return await command(container, [
+      'exec', '-i', '--user', 'kiro', '--workdir', '/home/kiro/workspace',
+      'kiro-docs', '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
+    ]);
+  } catch (error) {
+    if (error.stage !== 'exit') throw error;
+    let ids;
+    try { ids = (await command(container, ['list', '--all', '--quiet'], 10000)).split(/\s+/); }
+    catch { throw error; }
+    if (ids.includes('kiro-docs')) throw error;
+    throw new CollectorError('exit', 'the kiro-docs container does not exist', { missingPath: 'container kiro-docs', stderr: error.stderr });
+  }
+}
+
 const claudeDirectory = path.join(home, 'Library/Application Support/Claude');
 const claudeHistory = '~/Library/Application Support/Claude/plan-usage-history.json';
 
@@ -232,13 +250,7 @@ const collectors = {
     ]),
     parse: normalizeAntigravity,
   },
-  kiro: {
-    query: () => command('/opt/homebrew/bin/container', [
-      'exec', '-i', '--user', 'kiro', '--workdir', '/home/kiro/workspace',
-      'kiro-docs', '/usr/local/bin/kiro-cli', 'chat', '--no-interactive', '--trust-tools=', '/usage',
-    ]),
-    parse: normalizeKiro,
-  },
+  kiro: { query: () => queryKiro(), parse: normalizeKiro },
 };
 
 // Every subscription row is reported. A failed provider reports its rows with the
