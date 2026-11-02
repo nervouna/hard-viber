@@ -9,8 +9,8 @@ Appearance-specific values are kept together in specialization arrays; do not
 add a competing base property alongside an array for the same value.
 
 The three generated proposals (Fried Laptop, Melted Groove, Spent Spark) and the
-presentation board they came from were removed from the tree. They remain in git
-history at commit `c683314`, under `Assets/Icon/Concepts/`.
+presentation board they came from are not kept in the repository. They were
+removed from its history as well, to keep clones small.
 
 `Artwork/fried-laptop.png` is the approved character isolated on transparency.
 `Artwork/menu-bar-source.png` is its simplified black template artwork. Both
