@@ -6,6 +6,7 @@ macOS menu bar app (Swift/SwiftUI + AppKit) plus a Node 24 collector. See README
 
 - Build: `bash scripts/build.sh` → `build/Quota.app` (about 25 s). It signs ad hoc; `CODESIGN_IDENTITY="Developer ID Application: …"` signs with the hardened runtime and a secure timestamp for notarization.
 - Test: `scripts/test.sh` runs the Node suites and `swift test`, and exits non-zero on any failure. Run it before committing. `swift build` / `swift test` work on their own; `scripts/test.sh <dir>` (or `QUOTA_IMAGE_FIXTURES=<dir> swift test`) also writes the shareable image fixtures.
+- Release: `scripts/release.sh` tests, builds with Developer ID, notarizes, staples, archives to `build/release/` and installs into `~/Applications`. It reads `~/.config/quota/signing.env` (README.md › Release), needs a clean tree, and uploads to Apple, so run it only when the user asks for a release.
 - Run: `open build/Quota.app --args --show`. The user's own copy may be running from `~/Applications/Quota.app`; both share the cache in `~/Library/Application Support/Quota/` and the log in `~/Library/Logs/Quota/`.
 
 ## Conventions

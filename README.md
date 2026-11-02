@@ -33,7 +33,26 @@ The Swift code is a package (`Package.swift`, Swift 6 language mode, macOS 14): 
 CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)" bash scripts/build.sh
 ```
 
-To install, run `bash scripts/install.sh`, which builds the app (passing `CODESIGN_IDENTITY` through), quits a running Quota and replaces `~/Applications/Quota.app`.
+To install, run `bash scripts/install.sh`, which builds the app (passing `CODESIGN_IDENTITY` through), quits a running Quota and replaces `~/Applications/Quota.app`. `bash scripts/install.sh <app>` installs an already built bundle instead.
+
+### Release
+
+```bash
+scripts/release.sh                  # test, sign, notarize, staple, archive, install
+scripts/release.sh --skip-notarize  # stop after the signature checks
+scripts/release.sh --no-install     # leave ~/Applications/Quota.app alone
+```
+
+`release.sh` needs a clean working tree, because the version and build number come from `VERSION` and the commit. It runs `scripts/test.sh`, builds with the Developer ID identity, checks the signature (hardened runtime, secure timestamp, no `get-task-allow`), submits the app to Apple's notary service and waits, staples the ticket, checks that Gatekeeper accepts it as notarized, writes `build/release/Quota-<version>-<build>.zip` with its SHA-256, and installs it with `scripts/install.sh`.
+
+Its settings live outside the repository, in `~/.config/quota/signing.env` (or the file named by `QUOTA_SIGNING_ENV`):
+
+```bash
+QUOTA_CODESIGN_IDENTITY="Developer ID Application: <name> (<team>)"
+QUOTA_NOTARY_KEY=/path/to/AuthKey_<id>.p8   # App Store Connect API key
+QUOTA_NOTARY_KEY_ID=<key id>
+QUOTA_NOTARY_ISSUER_FILE=/path/to/issuer    # a file holding the issuer ID
+```
 
 `VERSION` holds the only version number. `build.sh` writes it to `CFBundleShortVersionString`, uses the commit count (`git rev-list --count HEAD`) as `CFBundleVersion`, and the collector sends it as `clientInfo.version`.
 
@@ -169,5 +188,6 @@ The collector's stderr goes to `~/Library/Logs/Quota/collector.log`: one line pe
 | `scripts/collect-usage.mjs` | The collector |
 | `scripts/claude-cache-probe.mjs` | The Claude Desktop cache reader |
 | `scripts/test*.mjs`, `Tests/QuotaKitTests/` | Tests, run by `scripts/test.sh` |
+| `scripts/build.sh`, `install.sh`, `release.sh` | Build the app, install it, make a notarized release |
 | `Assets/` | App icon, menu bar icon, image artwork |
 | `VERSION` | The version number |
