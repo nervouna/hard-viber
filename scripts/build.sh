@@ -12,6 +12,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -O \
   -o "$app_dir/Contents/MacOS/Quota"
 
 cp "$project_dir/scripts/collect-usage.mjs" "$project_dir/scripts/claude-cache-probe.mjs" "$app_dir/Contents/Resources/"
+cp "$project_dir/Assets/UsageImage/SharePaper.png" "$project_dir/Assets/UsageImage/ShareMascot.png" "$app_dir/Contents/Resources/"
 xcrun actool "$project_dir/Assets/Icon/Quota.icon" "$project_dir/Assets/MenuBar.xcassets" \
   --compile "$app_dir/Contents/Resources" \
   --platform macosx --target-device mac --minimum-deployment-target 14.0 \
@@ -27,8 +28,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Quota</string>
   <key>CFBundleDisplayName</key><string>Quota</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
-  <key>CFBundleVersion</key><string>11</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleVersion</key><string>12</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

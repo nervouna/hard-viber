@@ -6,11 +6,11 @@ struct QuotaImageTests {
     @MainActor
     static func main() throws {
         _ = NSApplication.shared
-        let now = ISO8601DateFormatter().date(from: "2026-11-02T07:21:00Z")!
+        let now = ISO8601DateFormatter().date(from: "2026-11-02T09:22:00Z")!
         let samples: [(String, Double, Double)] = [
-            ("Ultra", 66, 46), ("Pro", 72, 83),
-            ("Google AI Pro", 0, 53), ("Google AI Pro", 0, 167),
-            ("Pro", 2, 0), ("SuperGrok", 100, 20),
+            ("Ultra", 68, 43), ("Pro", 80, 81),
+            ("Google AI Pro", 0, 51), ("Google AI Pro", 0, 167),
+            ("Pro", 14, 0), ("SuperGrok", 100, 18),
         ]
         let quotas = Quota.placeholders.enumerated().map { index, value in
             var quota = value
@@ -29,7 +29,7 @@ struct QuotaImageTests {
                      "Exhausted subscriptions must move last without reordering the other subscriptions")
 
         let bitmap = QuotaImageExporter.render(quotas, at: now)!
-        precondition(bitmap.pixelsWide == 1440 && bitmap.pixelsHigh == 1280, "The export must be a 2x bitmap")
+        precondition(bitmap.pixelsWide == 1600 && bitmap.pixelsHigh == 1024, "The export must be a 2x landscape bitmap")
         let png = bitmap.representation(using: .png, properties: [:])!
         precondition(Array(png.prefix(8)) == [137, 80, 78, 71, 13, 10, 26, 10])
 
